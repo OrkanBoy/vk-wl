@@ -1,0 +1,27 @@
+.{
+    .name = .vk_wl,
+    .version = "0.0.0",
+    .fingerprint = 0x1f0d39bf1b30956f,
+    .minimum_zig_version = "0.14.0",
+    .dependencies = .{
+        .vulkan = .{
+            .url = "https://github.com/Snektron/vulkan-zig/archive/refs/heads/master.zip",
+            .hash = "vulkan-0.0.0-r7Ytx2dUAwDhoUvuIqliqPUbyDZZi0bl_CQIwspUpHs_",
+        },
+
+        .wayland = .{
+            .path = "../zig-wayland",
+        },
+        .vulkan_headers = .{
+            .url = "https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/heads/main.zip",
+            .hash = "N-V-__8AAKlk1QE99WUgLIRDlCtxMrEeHIC2b1BhY1S-X0Xp",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "main.zig",
+        "vertex.zig",
+        "fragment.zig",
+    },
+}
