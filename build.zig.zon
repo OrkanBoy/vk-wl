@@ -6,15 +6,14 @@
     .dependencies = .{
         .vulkan = .{
             .url = "https://github.com/Snektron/vulkan-zig/archive/refs/heads/master.zip",
-            .hash = "vulkan-0.0.0-r7Ytx2dUAwDhoUvuIqliqPUbyDZZi0bl_CQIwspUpHs_",
+            .hash = "vulkan-0.0.0-r7YtxwZVAwDbCFXX5GpnS436SfBec9INY0zq-2OQ2BUp",
         },
-
         .wayland = .{
             .path = "../zig-wayland",
         },
         .vulkan_headers = .{
             .url = "https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/heads/main.zip",
-            .hash = "N-V-__8AAKlk1QE99WUgLIRDlCtxMrEeHIC2b1BhY1S-X0Xp",
+            .hash = "N-V-__8AAI7-AQIsx0GGCNZVZDEQ-EhVjVd915WjwOOiSSA-",
         },
     },
     .paths = .{
