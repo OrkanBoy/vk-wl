@@ -1,14 +1,14 @@
 struct Camera {
-	float x;
-	float y;
-	float z;
+	float3 position;
 
 	float z_near;
 
-	float cos_z_x;
-	float sin_z_x;
-	float cos_z_y;
-	float sin_z_y;
+	float czx;
+	float szx;
+	float czy;
+	float szy;
+
+	float2 scale;
 };
 [[vk::binding(0,0)]]
 ConstantBuffer<Camera> camera;
@@ -18,10 +18,10 @@ struct VSOutput {
 	float3 color;
 };
 
-static const float2 positions[3] = {
-	float2( 1.0,  0.5),
-	float2( 0.0, -1.0),
-	float2(-1.0,  1.0),
+static const float3 positions[3] = {
+	float3( 6.0,  2.0, 2.0),
+	float3( 0.0, -2.0, 1.0),
+	float3(-6.0,  2.0, 2.0),
 };
 
 static const float3 colors[3] = {
@@ -33,11 +33,30 @@ static const float3 colors[3] = {
 [shader("vertex")]
 VSOutput vertexMain(uint id: SV_VertexID) {
 	VSOutput output;
+	float3 position = positions[id] - camera.position;
+
+	float x, y, z;
+
+	z = position.z;
+	x = position.x;
+	position.z = z * camera.czx + x * camera.szx;
+	position.x = x * camera.czx - z * camera.szx;
+
+	z = position.z;
+	y = position.y;
+	position.z = z * camera.czy + y * camera.szy;
+	position.y = y * camera.czy - z * camera.szy;
+
+	position.z += camera.z_near;
+
+	position.x *= camera.scale.x;
+	position.y *= camera.scale.y;
+
 	output.position = float4(
-		positions[id].x - camera.x, 
-		positions[id].y - camera.y, 
-		0.0, 
-		1.0,
+		position.x,
+		position.y,
+		0.0,
+		position.z,
 	);
 	output.color = colors[id];
 	return output;

@@ -1,7 +1,10 @@
 const std = @import("std");
 const wayland = @import("wayland");
+
 const wl = wayland.client.wl;
 const xdg = wayland.client.xdg;
+const zwp = wayland.client.zwp;
+
 const vk = @import("vulkan");
 
 const tau = std.math.tau;
@@ -14,20 +17,36 @@ const RegistryListenerData = struct {
     compositor: *wl.Compositor,
     wm_base: *xdg.WmBase,
     seat: *wl.Seat,
+    output: *wl.Output,
+    relative_pointer_manager_v1: *zwp.RelativePointerManagerV1,
+    pointer_constraints_v1: *zwp.PointerConstraintsV1,
 };
+
+const clamp = std.math.clamp;
+const rotate_factor = 1 << 0x10;
+const range_rotate_factor = 1 << 0x10;
+const rotate_unit: i32 = @intFromFloat(tau * rotate_factor);
+const range_rotate_unit: i32 = @intFromFloat(tau * range_rotate_factor);
 
 const camera = struct {
     const Uniform = extern struct {
-        x: f32,
-        y: f32,
-        z: f32,
+        position: extern struct {
+            x: f32,
+            y: f32,
+            z: f32,
+        },
 
         z_near: f32,
 
-        cos_x_z: f32,
-        sin_x_z: f32,
-        cos_z_y: f32,
-        sin_z_y: f32,
+        czx: f32,
+        szx: f32,
+        czy: f32,
+        szy: f32,
+
+        scale: extern struct {
+            x: f32,
+            y: f32,
+        },
     };
 
     const Keyboard = struct {
@@ -39,9 +58,16 @@ const camera = struct {
 
         z_pos: bool,
         z_neg: bool,
+
+        locked_pointer_toggle: bool,
+    };
+    const RelativePointerV1 = struct {
+        // fixed point 24.8
+        dzx: i32,
+        dzy: i32,
     };
     const Pointer = struct {
-        _: u0,
+        dzx_half_range: i32,
     };
 };
 
@@ -55,6 +81,9 @@ pub fn main() !void {
     const compositor = registry_listener_data.compositor;
     const wm_base = registry_listener_data.wm_base;
     const seat = registry_listener_data.seat;
+    const output = registry_listener_data.output;
+    const relative_pointer_manager_v1 = registry_listener_data.relative_pointer_manager_v1;
+    const pointer_constraints_v1 = registry_listener_data.pointer_constraints_v1;
 
     const keyboard = try seat.getKeyboard();
     defer keyboard.destroy();
@@ -68,17 +97,46 @@ pub fn main() !void {
 
         .z_pos = false,
         .z_neg = false,
+
+        .locked_pointer_toggle = false,
     };
-    keyboard.setListener(*camera.Keyboard, keyboardListener, &camera_keyboard);
+    keyboard.setListener(
+        *camera.Keyboard,
+        keyboardListener,
+        &camera_keyboard,
+    );
 
     const pointer = try seat.getPointer();
     defer pointer.destroy();
 
-    var camera_pointer: camera.Pointer = undefined;
-    pointer.setListener(*camera.Pointer, pointerListener, &camera_pointer);
+    var camera_pointer: camera.Pointer = .{
+        .dzx_half_range = 0,
+    };
+    var camera_zx_half_range: i32 = range_rotate_unit / 6;
+    pointer.setListener(
+        *camera.Pointer,
+        pointerListener,
+        &camera_pointer,
+    );
+
+    var camera_relative_pointer_v1: camera.RelativePointerV1 = .{
+        .dzx = 0,
+        .dzy = 0,
+    };
+    var camera_zx: i32 = 0;
+    var camera_zy: i32 = 0;
+    const relative_pointer_v1 = try relative_pointer_manager_v1.getRelativePointer(pointer);
+    relative_pointer_v1.setListener(
+        *camera.RelativePointerV1,
+        relativePointerV1Listener,
+        &camera_relative_pointer_v1,
+    );
 
     const wl_surface = try compositor.createSurface();
     defer wl_surface.destroy();
+
+    var scale_factor: i32 = 0;
+    output.setListener(*i32, outputListener, &scale_factor);
 
     const xdg_surface = try wm_base.getXdgSurface(wl_surface);
     defer xdg_surface.destroy();
@@ -87,7 +145,13 @@ pub fn main() !void {
     defer toplevel.destroy();
 
     var toplevel_event: ?xdg.Toplevel.Event = null;
-    toplevel.setListener(*?xdg.Toplevel.Event, xdgToplevelListener, &toplevel_event);
+    toplevel.setListener(
+        *?xdg.Toplevel.Event,
+        xdgToplevelListener,
+        &toplevel_event,
+    );
+
+    var locked_pointer: ?*zwp.LockedPointerV1 = null;
 
     wl_surface.commit();
 
@@ -221,8 +285,6 @@ pub fn main() !void {
         .properties = undefined,
     };
     vki.getPhysicalDeviceProperties2(physical_device, &physical_device_properties);
-    const version: vk.Version = @bitCast(physical_device_properties.properties.api_version);
-    print("api version\n{?}\n\n", .{version});
     const physical_device_memory_properties = vki.getPhysicalDeviceMemoryProperties(physical_device);
 
     var features_descriptor_buffer: vk.PhysicalDeviceDescriptorBufferFeaturesEXT = .{
@@ -243,11 +305,19 @@ pub fn main() !void {
         .descriptor_indexing = vk.TRUE,
         .vulkan_memory_model = vk.TRUE,
         .vulkan_memory_model_availability_visibility_chains = vk.TRUE,
+        .shader_int_8 = vk.TRUE,
         .p_next = @ptrCast(&features_1_3),
     };
     var features_1_1: vk.PhysicalDeviceVulkan11Features = .{
         .shader_draw_parameters = vk.TRUE,
         .p_next = @ptrCast(&features_1_2),
+    };
+    var features: vk.PhysicalDeviceFeatures2 = .{
+        .features = .{
+            .shader_int_64 = vk.TRUE,
+            .shader_int_16 = vk.TRUE,
+        },
+        .p_next = @ptrCast(&features_1_1),
     };
 
     const device_extensions = [_][*:0]const u8{
@@ -267,11 +337,8 @@ pub fn main() !void {
             }),
             .enabled_extension_count = device_extensions.len,
             .pp_enabled_extension_names = &device_extensions,
-            .p_enabled_features = &vk.PhysicalDeviceFeatures{
-                .shader_int_64 = vk.TRUE,
-                .shader_int_16 = vk.TRUE,
-            },
-            .p_next = @ptrCast(&features_1_1),
+            .p_enabled_features = null,
+            .p_next = @ptrCast(&features),
         },
         null,
     );
@@ -715,24 +782,94 @@ pub fn main() !void {
         time = new_time;
 
         {
-            const dt: f32 = @as(f32, @floatFromInt(delta_time)) / 1_000_000_000.0;
-            if (camera_keyboard.x_pos and !camera_keyboard.x_neg) {
-                camera_uniform.x += dt;
-            } else if (!camera_keyboard.x_pos and camera_keyboard.x_neg) {
-                camera_uniform.x -= dt;
+            if (camera_keyboard.locked_pointer_toggle) {
+                if (locked_pointer == null) {
+                    locked_pointer = try pointer_constraints_v1.lockPointer(
+                        wl_surface,
+                        pointer,
+                        null,
+                        .persistent,
+                    );
+                } else {
+                    locked_pointer.?.destroy();
+                    locked_pointer = null;
+                }
+                camera_keyboard.locked_pointer_toggle = false;
             }
 
-            if (camera_keyboard.y_pos and !camera_keyboard.y_neg) {
-                camera_uniform.y += dt;
-            } else if (!camera_keyboard.y_pos and camera_keyboard.y_neg) {
-                camera_uniform.y -= dt;
+            if (locked_pointer != null) {
+                camera_zx += camera_relative_pointer_v1.dzx;
+
+                camera_zy += camera_relative_pointer_v1.dzy;
+                camera_zy = clamp(
+                    camera_zy,
+                    -rotate_unit / 5,
+                    rotate_unit / 5,
+                );
+
+                camera_zx_half_range += camera_pointer.dzx_half_range;
+
+                camera_zx_half_range = clamp(
+                    camera_zx_half_range,
+                    range_rotate_unit / 8,
+                    range_rotate_unit / 5,
+                );
+
+                camera_relative_pointer_v1.dzx = 0;
+                camera_relative_pointer_v1.dzy = 0;
+                camera_pointer.dzx_half_range = 0;
             }
 
-            if (camera_keyboard.z_pos and !camera_keyboard.z_neg) {
-                camera_uniform.z += dt;
-            } else if (!camera_keyboard.z_pos and camera_keyboard.z_neg) {
-                camera_uniform.z -= dt;
+            var zx: f32 = @floatFromInt(camera_zx);
+            zx /= rotate_factor;
+
+            var zy: f32 = @floatFromInt(camera_zy);
+            zy /= rotate_factor;
+
+            var zx_half_range: f32 = @floatFromInt(camera_zx_half_range);
+            zx_half_range /= range_rotate_factor;
+
+            if (locked_pointer != null) {
+                const dt: f32 = @as(f32, @floatFromInt(delta_time)) / 1_000_000_000.0;
+
+                const dz = @cos(zx) * @cos(zy) * dt;
+                const dx = @sin(zx) * @cos(zy) * dt;
+
+                if (camera_keyboard.x_pos and !camera_keyboard.x_neg) {
+                    camera_uniform.position.z -= dx;
+                    camera_uniform.position.x += dz;
+                } else if (!camera_keyboard.x_pos and camera_keyboard.x_neg) {
+                    camera_uniform.position.z += dx;
+                    camera_uniform.position.x -= dz;
+                }
+
+                if (camera_keyboard.y_pos and !camera_keyboard.y_neg) {
+                    camera_uniform.position.y += dt;
+                } else if (!camera_keyboard.y_pos and camera_keyboard.y_neg) {
+                    camera_uniform.position.y -= dt;
+                }
+
+                if (camera_keyboard.z_pos and !camera_keyboard.z_neg) {
+                    camera_uniform.position.z += dz;
+                    camera_uniform.position.x += dx;
+                } else if (!camera_keyboard.z_pos and camera_keyboard.z_neg) {
+                    camera_uniform.position.z -= dz;
+                    camera_uniform.position.x -= dx;
+                }
             }
+
+            const camera_size_x: f32 = 1.0;
+            camera_uniform.z_near = camera_size_x / @tan(zx_half_range);
+            camera_uniform.scale.x = camera_uniform.z_near / camera_size_x;
+            camera_uniform.scale.y = camera_uniform.scale.x *
+                @as(f32, @floatFromInt(swapchain_extent.width)) /
+                @as(f32, @floatFromInt(swapchain_extent.height));
+
+            camera_uniform.czx = @cos(zx);
+            camera_uniform.szx = @sin(zx);
+
+            camera_uniform.czy = @cos(zy);
+            camera_uniform.szy = @sin(zy);
         }
 
         if (toplevel_event) |event| {
@@ -741,8 +878,8 @@ pub fn main() !void {
                     try vkd.deviceWaitIdle(device);
                     return;
                 },
-                .configure => |configure| if (swapchain_extent.width != @as(u32, @intCast(configure.width)) or
-                    swapchain_extent.height != @as(u32, @intCast(configure.height)))
+                .configure => |configure| if (swapchain_extent.width != @as(u32, @intCast(scale_factor * configure.width)) or
+                    swapchain_extent.height != @as(u32, @intCast(scale_factor * configure.height)))
                 {
                     if (swapchain != .null_handle) {
                         try vkd.deviceWaitIdle(device);
@@ -752,8 +889,8 @@ pub fn main() !void {
                         vkd.destroySwapchainKHR(device, swapchain, null);
                     }
                     swapchain_extent = .{
-                        .width = @intCast(configure.width),
-                        .height = @intCast(configure.height),
+                        .width = @intCast(scale_factor * configure.width),
+                        .height = @intCast(scale_factor * configure.height),
                     };
 
                     swapchain = try vkd.createSwapchainKHR(
@@ -1017,49 +1154,128 @@ pub fn main() !void {
 fn registryListener(registry: *wl.Registry, event: wl.Registry.Event, data: *RegistryListenerData) void {
     switch (event) {
         .global => |global| {
-            if (std.mem.orderZ(u8, global.interface, "wl_compositor") == .eq) {
-                data.compositor = registry.bind(global.name, wl.Compositor, global.version) catch return;
-            } else if (std.mem.orderZ(u8, global.interface, "xdg_wm_base") == .eq) {
-                data.wm_base = registry.bind(global.name, xdg.WmBase, global.version) catch return;
-            } else if (std.mem.orderZ(u8, global.interface, "wl_seat") == .eq) {
-                data.seat = registry.bind(global.name, wl.Seat, global.version) catch return;
+            const eql = std.mem.eql;
+            const global_interface = std.mem.span(global.interface);
+
+            if (eql(u8, global_interface, "wl_compositor")) {
+                data.compositor = registry.bind(
+                    global.name,
+                    wl.Compositor,
+                    global.version,
+                ) catch return;
+            } else if (eql(u8, global_interface, "xdg_wm_base")) {
+                data.wm_base = registry.bind(
+                    global.name,
+                    xdg.WmBase,
+                    global.version,
+                ) catch return;
+            } else if (eql(u8, global_interface, "wl_seat")) {
+                data.seat = registry.bind(
+                    global.name,
+                    wl.Seat,
+                    global.version,
+                ) catch return;
+            } else if (eql(u8, global_interface, "wl_output")) {
+                data.output = registry.bind(
+                    global.name,
+                    wl.Output,
+                    global.version,
+                ) catch return;
+            } else if (eql(u8, global_interface, "zwp_relative_pointer_manager_v1")) {
+                data.relative_pointer_manager_v1 = registry.bind(
+                    global.name,
+                    zwp.RelativePointerManagerV1,
+                    global.version,
+                ) catch return;
+            } else if (eql(u8, global_interface, "zwp_pointer_constraints_v1")) {
+                data.pointer_constraints_v1 = registry.bind(
+                    global.name,
+                    zwp.PointerConstraintsV1,
+                    global.version,
+                ) catch return;
             }
         },
         .global_remove => {},
     }
 }
 
-fn keyboardListener(_: *wl.Keyboard, event: wl.Keyboard.Event, camera_keyboard: *camera.Keyboard) void {
+fn relativePointerV1Listener(
+    _: *zwp.RelativePointerV1,
+    event: zwp.RelativePointerV1.Event,
+    camera_relative_pointer_v1: *camera.RelativePointerV1,
+) void {
+    switch (event) {
+        .relative_motion => |relative_motion| {
+            camera_relative_pointer_v1.dzx = @intFromEnum(relative_motion.dx);
+            camera_relative_pointer_v1.dzy = @intFromEnum(relative_motion.dy);
+        },
+    }
+}
+
+fn keyboardListener(
+    _: *wl.Keyboard,
+    event: wl.Keyboard.Event,
+    camera_keyboard: *camera.Keyboard,
+) void {
     // _ = event;
     switch (event) {
         .key => |key| {
             // TODO: provide runtime binding of key values to fields
             const pressed = key.state == .pressed;
             switch (key.key) {
-                32 => camera_keyboard.x_pos = pressed,
-                30 => camera_keyboard.x_neg = pressed,
-                42 => camera_keyboard.y_pos = pressed,
-                57 => camera_keyboard.y_neg = pressed,
-                17 => camera_keyboard.z_pos = pressed,
-                31 => camera_keyboard.z_neg = pressed,
+                0x20 => camera_keyboard.x_pos = pressed,
+                0x1e => camera_keyboard.x_neg = pressed,
+                0x2a => camera_keyboard.y_pos = pressed,
+                0x39 => camera_keyboard.y_neg = pressed,
+                0x11 => camera_keyboard.z_pos = pressed,
+                0x1f => camera_keyboard.z_neg = pressed,
+                0x01 => camera_keyboard.locked_pointer_toggle = pressed,
                 else => {},
             }
         },
         else => {},
     }
-    // print("{?}\n\n", .{event});
     // print("{?}\n\n", .{camera_keyboard.*});
 }
 
-fn pointerListener(_: *wl.Pointer, event: wl.Pointer.Event, camera_pointer: *camera.Pointer) void {
-    _ = event;
-    _ = camera_pointer;
+fn pointerListener(
+    _: *wl.Pointer,
+    event: wl.Pointer.Event,
+    camera_pointer: *camera.Pointer,
+) void {
+    switch (event) {
+        .axis => |axis| if (axis.axis == .vertical_scroll) {
+            camera_pointer.dzx_half_range = @intFromEnum(axis.value);
+        },
+        else => {},
+    }
+
+    // switch (event) {
+    // }
+
     // print("{?}\n", .{event});
     // pointer_event.* = event;
 }
 
-fn xdgToplevelListener(_: *xdg.Toplevel, event: xdg.Toplevel.Event, toplevel_event: *?xdg.Toplevel.Event) void {
+fn xdgToplevelListener(
+    _: *xdg.Toplevel,
+    event: xdg.Toplevel.Event,
+    toplevel_event: *?xdg.Toplevel.Event,
+) void {
     toplevel_event.* = event;
+}
+
+fn outputListener(
+    _: *wl.Output,
+    event: wl.Output.Event,
+    scale_factor: *i32,
+) void {
+    switch (event) {
+        .scale => |scale| {
+            scale_factor.* = scale.factor;
+        },
+        else => {},
+    }
 }
 
 fn debugCallback(

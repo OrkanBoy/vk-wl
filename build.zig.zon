@@ -5,15 +5,16 @@
     .minimum_zig_version = "0.14.0",
     .dependencies = .{
         .vulkan = .{
-            .url = "https://github.com/Snektron/vulkan-zig/archive/refs/heads/master.zip",
-            .hash = "vulkan-0.0.0-r7YtxwZVAwDbCFXX5GpnS436SfBec9INY0zq-2OQ2BUp",
+            .url = "https://github.com/Snektron/vulkan-zig/archive/refs/heads/zig-0.14-compat.zip",
+            .hash = "vulkan-0.0.0-r7Ytx25WAwD68cFINm-HH0vC_zJqVIpgeby404eC5MGy",
         },
         .wayland = .{
-            .path = "../zig-wayland",
+            .url = "https://codeberg.org/ifreund/zig-wayland/archive/master.zip",
+            .hash = "wayland-0.4.0-dev-lQa1krLJAQBGO2aKqDcfxUOsW_e4PJZO_K_rxA20RztB",
         },
         .vulkan_headers = .{
             .url = "https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/heads/main.zip",
-            .hash = "N-V-__8AAI7-AQIsx0GGCNZVZDEQ-EhVjVd915WjwOOiSSA-",
+            .hash = "N-V-__8AAENI9wHIo_URLJ_ZfwllA6o_VuxahRnqI7iQfhEb",
         },
     },
     .paths = .{

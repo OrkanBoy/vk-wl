@@ -4,9 +4,7 @@ const gpu = std.gpu;
 const vertex = struct {
     extern var v_color: @Vector(3, f32) addrspace(.output);
     const Camera = extern struct {
-        x: f32,
-        y: f32,
-        z: f32,
+        position: @Vector(3, f32),
 
         z_near: f32,
 
@@ -18,21 +16,28 @@ const vertex = struct {
     extern var u_camera: Camera addrspace(.uniform);
 
     export fn vertexMain() callconv(.spirv_vertex) void {
-        const positions = [_]@Vector(2, f32){
-            .{ 1.0, 1.0 },
-            .{ 0.0, -1.0 },
-            .{ -1.0, 1.0 },
+        const positions = [_]@Vector(3, f32){
+            .{ 1.0, 1.0, 0.3 },
+            .{ 0.0, -1.0, 0.5 },
+            .{ -1.0, 1.0, 1.6 },
         };
         const color = [_]@Vector(3, f32){
-            .{ 1.0, 0.0, 0.0 },
-            .{ 0.0, 1.0, 0.0 },
-            .{ 0.0, 0.0, 1.0 },
+            .{ 0.9, 0.0, 0.3 },
+            .{ 0.4, 1.0, 0.0 },
+            .{ 0.9, 0.5, 0.7 },
         };
         gpu.location(&v_color, 0);
         gpu.binding(&u_camera, 0, 0);
 
+        const position = positions[gpu.vertex_index] - u_camera.position;
+
         v_color = color[gpu.vertex_index];
-        gpu.position_out.* = .{ positions[gpu.vertex_index][0], positions[gpu.vertex_index][1], 0.0, 1.0 };
+        gpu.position_out.* = .{
+            position[0],
+            position[1],
+            0.0,
+            position[2],
+        };
     }
 };
 
