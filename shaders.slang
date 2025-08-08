@@ -18,16 +18,24 @@ struct VSOutput {
 	float3 color;
 };
 
-static const float3 positions[3] = {
-	float3( 6.0,  2.0, 2.0),
-	float3( 0.0, -2.0, 1.0),
-	float3(-6.0,  2.0, 2.0),
+static const float3 positions[] = {
+	float3( 6.0,  2.0, 4.0),
+	float3( 0.0, -2.0, 2.0),
+	float3(-6.0,  2.0, 4.0),
+
+	float3( 4.0,  5.0, 3.0),
+	float3( 0.0, -10.0, 5.0),
+	float3(-4.0,  5.0, 3.0),
 };
 
-static const float3 colors[3] = {
-	float3(1.0, 1.0, 0.0),
+static const float3 colors[] = {
+	float3(1.0, 0.0, 1.0),
 	float3(0.0, 1.0, 0.0),
 	float3(0.0, 0.0, 1.0),
+
+	float3(1.0, 0.0, 0.0),
+	float3(0.0, 1.0, 1.0),
+	float3(1.0, 1.0, 0.0),
 };
 
 [shader("vertex")]
@@ -55,7 +63,7 @@ VSOutput vertexMain(uint id: SV_VertexID) {
 	output.position = float4(
 		position.x,
 		position.y,
-		0.0,
+		camera.z_near,
 		position.z,
 	);
 	output.color = colors[id];

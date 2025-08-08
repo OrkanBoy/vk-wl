@@ -389,6 +389,25 @@ pub fn main() !void {
     var swapchain_images_count: u32 = undefined;
     var swapchain_image_views: [4]vk.ImageView = undefined;
 
+    var depth_image_memory: vk.DeviceMemory = .null_handle;
+    defer vkd.freeMemory(
+        device,
+        depth_image_memory,
+        null,
+    );
+    var depth_image: vk.Image = .null_handle;
+    defer vkd.destroyImage(
+        device,
+        depth_image,
+        null,
+    );
+    var depth_image_view: vk.ImageView = .null_handle;
+    defer vkd.destroyImageView(
+        device,
+        depth_image_view,
+        null,
+    );
+
     var camera_buffer_memory_requirements: vk.MemoryRequirements2 = .{
         .memory_requirements = undefined,
     };
@@ -623,7 +642,9 @@ pub fn main() !void {
         .null_handle,
         1,
         @ptrCast(&vk.GraphicsPipelineCreateInfo{
-            .flags = .{ .descriptor_buffer_bit_ext = true },
+            .flags = .{
+                .descriptor_buffer_bit_ext = true,
+            },
             .base_pipeline_handle = .null_handle,
             .base_pipeline_index = undefined,
             .layout = pipeline_layout,
@@ -656,6 +677,18 @@ pub fn main() !void {
                         .a_bit = true,
                     },
                 }),
+            },
+            .p_depth_stencil_state = &vk.PipelineDepthStencilStateCreateInfo{
+                .depth_bounds_test_enable = vk.TRUE,
+                .flags = .{},
+                .depth_compare_op = .greater,
+                .depth_test_enable = vk.TRUE,
+                .depth_write_enable = vk.TRUE,
+                .stencil_test_enable = vk.FALSE,
+                .back = undefined,
+                .front = undefined,
+                .min_depth_bounds = 0.0,
+                .max_depth_bounds = 1.0,
             },
             .p_vertex_input_state = &vk.PipelineVertexInputStateCreateInfo{},
             .p_rasterization_state = &vk.PipelineRasterizationStateCreateInfo{
@@ -705,7 +738,7 @@ pub fn main() !void {
             .p_next = &vk.PipelineRenderingCreateInfo{
                 .color_attachment_count = 1,
                 .p_color_attachment_formats = @ptrCast(&surface_format.format),
-                .depth_attachment_format = .undefined,
+                .depth_attachment_format = .d32_sfloat,
                 .stencil_attachment_format = .undefined,
                 .view_mask = 0,
             },
@@ -872,26 +905,156 @@ pub fn main() !void {
             camera_uniform.szy = @sin(zy);
         }
 
+        var image_memory_barriers: [2]vk.ImageMemoryBarrier2 = undefined;
+        var image_memory_barriers_len: u8 = 0;
+        var init_swapchain: bool = false;
+
         if (toplevel_event) |event| {
             switch (event) {
                 .close => {
                     try vkd.deviceWaitIdle(device);
                     return;
                 },
-                .configure => |configure| if (swapchain_extent.width != @as(u32, @intCast(scale_factor * configure.width)) or
-                    swapchain_extent.height != @as(u32, @intCast(scale_factor * configure.height)))
-                {
+                .configure => |configure| {
+                    const width: u32 = @intCast(scale_factor * configure.width);
+                    const height: u32 = @intCast(scale_factor * configure.height);
+
+                    if (width == swapchain_extent.width and height == swapchain_extent.height) {
+                        break;
+                    }
+
+                    swapchain_extent = .{
+                        .width = width,
+                        .height = height,
+                    };
+
                     if (swapchain != .null_handle) {
                         try vkd.deviceWaitIdle(device);
                         for (0..swapchain_images_count) |i| {
-                            vkd.destroyImageView(device, swapchain_image_views[i], null);
+                            vkd.destroyImageView(
+                                device,
+                                swapchain_image_views[i],
+                                null,
+                            );
                         }
-                        vkd.destroySwapchainKHR(device, swapchain, null);
+                        vkd.destroySwapchainKHR(
+                            device,
+                            swapchain,
+                            null,
+                        );
+                        vkd.destroyImageView(
+                            device,
+                            depth_image_view,
+                            null,
+                        );
+                        vkd.destroyImage(
+                            device,
+                            depth_image,
+                            null,
+                        );
+                        vkd.freeMemory(
+                            device,
+                            depth_image_memory,
+                            null,
+                        );
                     }
-                    swapchain_extent = .{
-                        .width = @intCast(scale_factor * configure.width),
-                        .height = @intCast(scale_factor * configure.height),
+                    var depth_image_memory_requirements: vk.MemoryRequirements2 = .{
+                        .memory_requirements = undefined,
                     };
+                    const depth_image_create_info: vk.ImageCreateInfo = .{
+                        .array_layers = 1,
+                        .extent = .{
+                            .width = swapchain_extent.width,
+                            .height = swapchain_extent.height,
+                            .depth = 1,
+                        },
+                        .format = .d32_sfloat,
+                        .flags = .{},
+                        .image_type = .@"2d",
+                        .initial_layout = .undefined,
+                        .mip_levels = 1,
+                        .usage = .{
+                            .depth_stencil_attachment_bit = true,
+                        },
+                        .queue_family_index_count = 1,
+                        .p_queue_family_indices = &[_]u32{0},
+                        .sharing_mode = .exclusive,
+                        .samples = .{
+                            .@"1_bit" = true,
+                        },
+                        .tiling = .optimal,
+                    };
+
+                    vkd.getDeviceImageMemoryRequirements(
+                        device,
+                        &vk.DeviceImageMemoryRequirements{
+                            .p_create_info = &depth_image_create_info,
+                            .plane_aspect = .{
+                                .depth_bit = true,
+                            },
+                        },
+                        &depth_image_memory_requirements,
+                    );
+
+                    depth_image_memory = try vkd.allocateMemory(
+                        device,
+                        &vk.MemoryAllocateInfo{
+                            .allocation_size = depth_image_memory_requirements.memory_requirements.size,
+                            .memory_type_index = try findMemoryTypeIndex(
+                                depth_image_memory_requirements.memory_requirements.memory_type_bits,
+                                vk.MemoryPropertyFlags{
+                                    .device_local_bit = true,
+                                },
+                                physical_device_memory_properties,
+                            ),
+                        },
+                        null,
+                    );
+
+                    depth_image = try vkd.createImage(
+                        device,
+                        &depth_image_create_info,
+                        null,
+                    );
+                    _ = try vkd.bindImageMemory2(
+                        device,
+                        1,
+                        &[_]vk.BindImageMemoryInfo{
+                            vk.BindImageMemoryInfo{
+                                .image = depth_image,
+                                .memory = depth_image_memory,
+                                .memory_offset = 0,
+                            },
+                        },
+                    );
+
+                    depth_image_view = try vkd.createImageView(
+                        device,
+                        &vk.ImageViewCreateInfo{
+                            .components = .{
+                                .r = .identity,
+                                .b = .identity,
+                                .g = .identity,
+                                .a = .identity,
+                            },
+                            .flags = .{},
+                            .format = depth_image_create_info.format,
+                            .image = depth_image,
+                            .view_type = .@"2d",
+                            .subresource_range = .{
+                                .aspect_mask = .{
+                                    .depth_bit = true,
+                                },
+                                .base_array_layer = 0,
+                                .base_mip_level = 0,
+                                .layer_count = 1,
+                                .level_count = 1,
+                            },
+                        },
+                        null,
+                    );
+
+                    init_swapchain = true;
 
                     swapchain = try vkd.createSwapchainKHR(
                         device,
@@ -955,6 +1118,65 @@ pub fn main() !void {
             toplevel_event = null;
         }
 
+        image_memory_barriers[image_memory_barriers_len] = if (init_swapchain)
+            vk.ImageMemoryBarrier2{
+                .src_queue_family_index = 0,
+                .dst_queue_family_index = 0,
+                .src_stage_mask = .{},
+                .src_access_mask = .{},
+                .dst_stage_mask = .{
+                    .early_fragment_tests_bit = true,
+                    .late_fragment_tests_bit = true,
+                },
+                .dst_access_mask = .{
+                    .depth_stencil_attachment_write_bit = true,
+                },
+                .image = depth_image,
+                .old_layout = .undefined,
+                .new_layout = .depth_attachment_optimal,
+                .subresource_range = .{
+                    .aspect_mask = .{
+                        .depth_bit = true,
+                    },
+                    .base_array_layer = 0,
+                    .base_mip_level = 0,
+                    .layer_count = 1,
+                    .level_count = 1,
+                },
+            }
+        else
+            vk.ImageMemoryBarrier2{
+                .src_queue_family_index = 0,
+                .dst_queue_family_index = 0,
+                .src_stage_mask = .{
+                    .early_fragment_tests_bit = true,
+                    .late_fragment_tests_bit = true,
+                },
+                .src_access_mask = .{
+                    .depth_stencil_attachment_write_bit = true,
+                },
+                .dst_stage_mask = .{
+                    .early_fragment_tests_bit = true,
+                    .late_fragment_tests_bit = true,
+                },
+                .dst_access_mask = .{
+                    .depth_stencil_attachment_write_bit = true,
+                },
+                .image = depth_image,
+                .old_layout = .depth_attachment_optimal,
+                .new_layout = .depth_attachment_optimal,
+                .subresource_range = .{
+                    .aspect_mask = .{
+                        .depth_bit = true,
+                    },
+                    .base_array_layer = 0,
+                    .base_mip_level = 0,
+                    .layer_count = 1,
+                    .level_count = 1,
+                },
+            };
+        image_memory_barriers_len += 1;
+
         _ = try vkd.waitForFences(
             device,
             1,
@@ -980,34 +1202,37 @@ pub fn main() !void {
         {
             try vkd.beginCommandBuffer(command_buffers[frame], &.{ .flags = .{ .one_time_submit_bit = true } });
 
+            image_memory_barriers[image_memory_barriers_len] = vk.ImageMemoryBarrier2{
+                .src_queue_family_index = 0,
+                .dst_queue_family_index = 0,
+                .subresource_range = .{
+                    .aspect_mask = .{ .color_bit = true },
+                    .base_array_layer = 0,
+                    .base_mip_level = 0,
+                    .layer_count = vk.REMAINING_ARRAY_LAYERS,
+                    .level_count = vk.REMAINING_MIP_LEVELS,
+                },
+                .old_layout = .undefined,
+                .new_layout = .color_attachment_optimal,
+                .image = swapchain_images[swapchain_image_index],
+                .src_stage_mask = .{
+                    .color_attachment_output_bit = true,
+                },
+                .src_access_mask = .{},
+                .dst_stage_mask = .{
+                    .color_attachment_output_bit = true,
+                },
+                .dst_access_mask = .{
+                    .color_attachment_write_bit = true,
+                },
+            };
+            image_memory_barriers_len += 1;
+
             vkd.cmdPipelineBarrier2(
                 command_buffers[frame],
                 &vk.DependencyInfo{
-                    .image_memory_barrier_count = 1,
-                    .p_image_memory_barriers = @ptrCast(&vk.ImageMemoryBarrier2{
-                        .src_queue_family_index = 0,
-                        .dst_queue_family_index = 0,
-                        .subresource_range = .{
-                            .aspect_mask = .{ .color_bit = true },
-                            .base_array_layer = 0,
-                            .base_mip_level = 0,
-                            .layer_count = vk.REMAINING_ARRAY_LAYERS,
-                            .level_count = vk.REMAINING_MIP_LEVELS,
-                        },
-                        .old_layout = .undefined,
-                        .new_layout = .color_attachment_optimal,
-                        .image = swapchain_images[swapchain_image_index],
-                        .src_stage_mask = .{
-                            .color_attachment_output_bit = true,
-                        },
-                        .src_access_mask = .{},
-                        .dst_stage_mask = .{
-                            .color_attachment_output_bit = true,
-                        },
-                        .dst_access_mask = .{
-                            .color_attachment_write_bit = true,
-                        },
-                    }),
+                    .image_memory_barrier_count = image_memory_barriers_len,
+                    .p_image_memory_barriers = &image_memory_barriers,
                 },
             );
 
@@ -1025,18 +1250,36 @@ pub fn main() !void {
                     .color_attachment_count = 1,
                     .p_color_attachments = @ptrCast(&vk.RenderingAttachmentInfo{
                         .image_view = swapchain_image_views[swapchain_image_index],
-                        .clear_value = vk.ClearValue{ .color = .{ .float_32 = [4]f32{
-                            0.0,
-                            0.0,
-                            0.0,
-                            0.0,
-                        } } },
+                        .clear_value = vk.ClearValue{
+                            .color = .{
+                                .float_32 = [4]f32{
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                },
+                            },
+                        },
                         .image_layout = .rendering_local_read,
                         .resolve_mode = .{},
                         .load_op = .clear,
                         .store_op = .store,
                         .resolve_image_layout = .undefined,
                     }),
+                    .p_depth_attachment = &vk.RenderingAttachmentInfo{
+                        .image_view = depth_image_view,
+                        .clear_value = vk.ClearValue{
+                            .depth_stencil = .{
+                                .depth = 0.0,
+                                .stencil = 0,
+                            },
+                        },
+                        .image_layout = .rendering_local_read,
+                        .resolve_mode = .{},
+                        .load_op = .clear,
+                        .store_op = .store,
+                        .resolve_image_layout = .undefined,
+                    },
                 });
 
                 vkd.cmdSetViewport(command_buffers[frame], 0, 1, @ptrCast(&vk.Viewport{
@@ -1078,7 +1321,7 @@ pub fn main() !void {
                     },
                 );
 
-                vkd.cmdDraw(command_buffers[frame], 3, 1, 0, 0);
+                vkd.cmdDraw(command_buffers[frame], 6, 1, 0, 0);
 
                 vkd.cmdEndRendering(command_buffers[frame]);
             }
