@@ -909,7 +909,7 @@ pub fn main() !void {
         var image_memory_barriers_len: u8 = 0;
         var init_swapchain: bool = false;
 
-        if (toplevel_event) |event| {
+        if (toplevel_event) |event| event_handle: {
             switch (event) {
                 .close => {
                     try vkd.deviceWaitIdle(device);
@@ -920,7 +920,7 @@ pub fn main() !void {
                     const height: u32 = @intCast(scale_factor * configure.height);
 
                     if (width == swapchain_extent.width and height == swapchain_extent.height) {
-                        break;
+                        break :event_handle;
                     }
 
                     swapchain_extent = .{
