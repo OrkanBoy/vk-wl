@@ -10,6 +10,7 @@ const vk = @import("vulkan");
 const tau = std.math.tau;
 const print = std.debug.print;
 const nanoTimestamp = std.time.nanoTimestamp;
+const log2_int_ceil = std.math.log2_int_ceil;
 
 // const vk = @import("vulkan");
 
@@ -389,10 +390,10 @@ pub fn main() !void {
     var swapchain_images_count: u32 = undefined;
     var swapchain_image_views: [4]vk.ImageView = undefined;
 
-    var depth_image_memory: vk.DeviceMemory = .null_handle;
+    var depth_memory: vk.DeviceMemory = .null_handle;
     defer vkd.freeMemory(
         device,
-        depth_image_memory,
+        depth_memory,
         null,
     );
     var depth_image: vk.Image = .null_handle;
@@ -408,7 +409,7 @@ pub fn main() !void {
         null,
     );
 
-    var camera_buffer_memory_requirements: vk.MemoryRequirements2 = .{
+    var camera_memory_requirements: vk.MemoryRequirements2 = .{
         .memory_requirements = undefined,
     };
     const camera_buffer_create_info = vk.BufferCreateInfo{
@@ -426,15 +427,15 @@ pub fn main() !void {
         &vk.DeviceBufferMemoryRequirements{
             .p_create_info = &camera_buffer_create_info,
         },
-        &camera_buffer_memory_requirements,
+        &camera_memory_requirements,
     );
 
-    const camera_buffer_memory = try vkd.allocateMemory(
+    const camera_memory = try vkd.allocateMemory(
         device,
         &vk.MemoryAllocateInfo{
-            .allocation_size = camera_buffer_memory_requirements.memory_requirements.size,
+            .allocation_size = camera_memory_requirements.memory_requirements.size,
             .memory_type_index = try findMemoryTypeIndex(
-                camera_buffer_memory_requirements.memory_requirements.memory_type_bits,
+                camera_memory_requirements.memory_requirements.memory_type_bits,
                 vk.MemoryPropertyFlags{
                     .host_coherent_bit = true,
                     .host_visible_bit = true,
@@ -450,18 +451,31 @@ pub fn main() !void {
         },
         null,
     );
-    defer vkd.freeMemory(device, camera_buffer_memory, null);
+    defer vkd.freeMemory(device, camera_memory, null);
 
     const camera_buffer = try vkd.createBuffer(
         device,
         &camera_buffer_create_info,
         null,
     );
-    defer vkd.destroyBuffer(device, camera_buffer, null);
+    defer vkd.destroyBuffer(
+        device,
+        camera_buffer,
+        null,
+    );
+    _ = try vkd.bindBufferMemory2(
+        device,
+        1,
+        @ptrCast(&vk.BindBufferMemoryInfo{
+            .buffer = camera_buffer,
+            .memory = camera_memory,
+            .memory_offset = 0,
+        }),
+    );
 
     const camera_uniform: *camera.Uniform = @ptrCast(@alignCast(try vkd.mapMemory2(device, &vk.MemoryMapInfo{
         .flags = .{},
-        .memory = camera_buffer_memory,
+        .memory = camera_memory,
         .offset = 0,
         .size = @sizeOf(camera.Uniform),
     })));
@@ -492,7 +506,7 @@ pub fn main() !void {
         null,
     );
 
-    var descriptor_buffer_memory_requirements: vk.MemoryRequirements2 = .{
+    var descriptor_memory_requirements: vk.MemoryRequirements2 = .{
         .memory_requirements = undefined,
     };
     const descriptor_buffer_create_info = vk.BufferCreateInfo{
@@ -513,15 +527,15 @@ pub fn main() !void {
         &vk.DeviceBufferMemoryRequirements{
             .p_create_info = &descriptor_buffer_create_info,
         },
-        &descriptor_buffer_memory_requirements,
+        &descriptor_memory_requirements,
     );
 
-    const descriptor_buffer_memory = try vkd.allocateMemory(
+    const descriptor_memory = try vkd.allocateMemory(
         device,
         &vk.MemoryAllocateInfo{
-            .allocation_size = descriptor_buffer_memory_requirements.memory_requirements.size,
+            .allocation_size = descriptor_memory_requirements.memory_requirements.size,
             .memory_type_index = try findMemoryTypeIndex(
-                descriptor_buffer_memory_requirements.memory_requirements.memory_type_bits,
+                descriptor_memory_requirements.memory_requirements.memory_type_bits,
                 vk.MemoryPropertyFlags{
                     .host_visible_bit = true,
                     // TODO:
@@ -537,7 +551,7 @@ pub fn main() !void {
         },
         null,
     );
-    defer vkd.freeMemory(device, descriptor_buffer_memory, null);
+    defer vkd.freeMemory(device, descriptor_memory, null);
 
     const descriptor_buffer = try vkd.createBuffer(
         device,
@@ -550,28 +564,20 @@ pub fn main() !void {
         device,
         &vk.MemoryMapInfo{
             .flags = .{},
-            .memory = descriptor_buffer_memory,
+            .memory = descriptor_memory,
             .offset = 0,
             .size = descriptor_buffer_create_info.size,
         },
     )).?;
 
-    const bind_buffer_memory_infos = [_]vk.BindBufferMemoryInfo{
-        vk.BindBufferMemoryInfo{
-            .buffer = camera_buffer,
-            .memory = camera_buffer_memory,
-            .memory_offset = 0,
-        },
-        vk.BindBufferMemoryInfo{
-            .buffer = descriptor_buffer,
-            .memory = descriptor_buffer_memory,
-            .memory_offset = 0,
-        },
-    };
     _ = try vkd.bindBufferMemory2(
         device,
-        bind_buffer_memory_infos.len,
-        &bind_buffer_memory_infos,
+        1,
+        @ptrCast(&vk.BindBufferMemoryInfo{
+            .buffer = descriptor_buffer,
+            .memory = descriptor_memory,
+            .memory_offset = 0,
+        }),
     );
     // print("{x}\n{x}\n", .{ descriptor_set_layout_size, descriptor_set_layout_binding_offset });
 
@@ -601,6 +607,246 @@ pub fn main() !void {
         physical_device_descriptor_buffer_properties.uniform_buffer_descriptor_size,
         @ptrCast(descriptor_buffer_mapped),
     );
+
+    const Voxel = enum {
+        Air,
+        Stone,
+    };
+    const dimensions = 3;
+
+    const log_side_len = 0x5;
+    const side_len = 1 << log_side_len;
+
+    const log_volume_len = log_side_len * dimensions;
+    const volume_len = 1 << log_volume_len;
+
+    const morton_mask: usize = comptime blk: {
+        var value: usize = 0;
+        for (0..log_side_len) |_| {
+            value <<= dimensions;
+            value |= 1;
+        }
+        break :blk value;
+    };
+
+    const allocator = std.heap.page_allocator;
+    var voxels = try allocator.alloc(Voxel, volume_len);
+    defer allocator.free(voxels);
+
+    const LogUsize = std.math.Log2Int(usize);
+    for (0..volume_len) |voxel_i| {
+        var sum: usize = 0;
+        for (0..dimensions) |_dimension_i| {
+            const dimension_i: LogUsize = @truncate(_dimension_i);
+            const coord = pext(usize, voxel_i, morton_mask << dimension_i);
+            sum += coord * coord;
+        }
+        const max_sum = 1 << (2 * log_side_len);
+        voxels[voxel_i] = if (sum > max_sum or sum < max_sum / 3) Voxel.Stone else Voxel.Air;
+    }
+    voxels[0] = Voxel.Stone;
+
+    var surfaces_len: u32 = 0;
+    for (0..volume_len) |voxel_i| {
+        if (voxels[voxel_i] == Voxel.Air) {
+            continue;
+        }
+        for (0..dimensions) |_dimension_i| {
+            const dimension_i: LogUsize = @truncate(_dimension_i);
+            const mask = morton_mask << dimension_i;
+            const coord = pext(usize, voxel_i, mask);
+            const cleaned_voxel_i = voxel_i & ~mask;
+
+            if (coord == 0 or
+                voxels[cleaned_voxel_i | pdep(usize, coord - 1, mask)] == Voxel.Air)
+            {
+                surfaces_len += 1;
+            }
+            if (coord == side_len - 1 or
+                voxels[cleaned_voxel_i | pdep(usize, coord + 1, mask)] == Voxel.Air)
+            {
+                surfaces_len += 1;
+            }
+        }
+    }
+
+    // const PartialVoxelId = UnsignedInt(log_side_len);
+    const Surface = UnsignedInt((dimensions * log_side_len) + (1 + log2_int_ceil(usize, dimensions)));
+    // const Surface = struct {
+    //     position: [dimensions]u8,
+    //     direction: u8,
+    // };
+
+    const surface_transfer_buffer_create_info: vk.BufferCreateInfo = .{
+        .flags = .{},
+        .usage = .{
+            .transfer_src_bit = true,
+        },
+        .sharing_mode = .exclusive,
+        .queue_family_index_count = 1,
+        .p_queue_family_indices = &[_]u32{0},
+        .size = @sizeOf(Surface) * surfaces_len,
+    };
+    var surface_transfer_memory_requirements: vk.MemoryRequirements2 = .{
+        .memory_requirements = undefined,
+    };
+    vkd.getDeviceBufferMemoryRequirements(
+        device,
+        &vk.DeviceBufferMemoryRequirements{
+            .p_create_info = &surface_transfer_buffer_create_info,
+        },
+        &surface_transfer_memory_requirements,
+    );
+    const surface_transfer_memory = try vkd.allocateMemory(
+        device,
+        &vk.MemoryAllocateInfo{
+            .allocation_size = surface_transfer_memory_requirements.memory_requirements.size,
+            .memory_type_index = try findMemoryTypeIndex(
+                surface_transfer_memory_requirements.memory_requirements.memory_type_bits,
+                vk.MemoryPropertyFlags{
+                    .host_visible_bit = true,
+                },
+                physical_device_memory_properties,
+            ),
+        },
+        null,
+    );
+    defer vkd.freeMemory(
+        device,
+        surface_transfer_memory,
+        null,
+    );
+    const surface_transfer_buffer = try vkd.createBuffer(
+        device,
+        &surface_transfer_buffer_create_info,
+        null,
+    );
+    defer vkd.destroyBuffer(
+        device,
+        surface_transfer_buffer,
+        null,
+    );
+
+    _ = try vkd.bindBufferMemory2(
+        device,
+        1,
+        @ptrCast(&vk.BindBufferMemoryInfo{
+            .buffer = surface_transfer_buffer,
+            .memory = surface_transfer_memory,
+            .memory_offset = 0,
+        }),
+    );
+    const surface_transfer_memory_mapped = @as([*]Surface, @ptrCast(@alignCast(try vkd.mapMemory2(
+        device,
+        &vk.MemoryMapInfo{
+            .memory = surface_transfer_memory,
+            .size = surface_transfer_buffer_create_info.size,
+            .flags = .{},
+            .offset = 0,
+        },
+    ))))[0..surfaces_len];
+
+    var surface_i: usize = 0;
+    for (0..volume_len) |voxel_i| {
+        if (voxels[voxel_i] == Voxel.Air) {
+            continue;
+        }
+
+        var surface: Surface = 0;
+        // var surface: Surface = undefined;
+        for (0..dimensions) |_dimension_i| {
+            const dimension_i: LogUsize = @truncate(_dimension_i);
+            // surface[dimension_i] = pext(usize, voxel_i, morton_mask << dimension_i);
+            surface <<= log_side_len;
+            surface |= @truncate(pext(usize, voxel_i, morton_mask << dimension_i));
+        }
+        surface <<= 1 + comptime log2_int_ceil(usize, dimensions);
+        for (0..dimensions) |_dimension_i| {
+            const dimension_i: LogUsize = @truncate(_dimension_i);
+            const mask = morton_mask << dimension_i;
+            const coord = pext(usize, voxel_i, mask);
+
+            const cleaned_voxel_i = voxel_i & ~mask;
+
+            if (coord == 0 or
+                voxels[cleaned_voxel_i | pdep(usize, coord - 1, mask)] == Voxel.Air)
+            {
+                surface_transfer_memory_mapped[surface_i] = surface | (dimension_i << 1) | 0;
+                // surface_transfer_memory_mapped[surface_i] = 1;
+                surface_i += 1;
+            }
+            if (coord == side_len - 1 or
+                voxels[cleaned_voxel_i | pdep(usize, coord + 1, mask)] == Voxel.Air)
+            {
+                surface_transfer_memory_mapped[surface_i] = surface | (dimension_i << 1) | 1;
+
+                // surface_transfer_memory_mapped[surface_i] = 1;
+                surface_i += 1;
+            }
+        }
+    }
+
+    var surface_buffer_create_info: vk.BufferCreateInfo = .{
+        .flags = .{},
+        .queue_family_index_count = 1,
+        .p_queue_family_indices = &[_]u32{0},
+        .sharing_mode = .exclusive,
+        .usage = .{
+            .vertex_buffer_bit = true,
+            .transfer_dst_bit = true,
+        },
+        .size = surface_transfer_buffer_create_info.size,
+    };
+    var surface_memory_requirements: vk.MemoryRequirements2 = .{
+        .memory_requirements = undefined,
+    };
+    vkd.getDeviceBufferMemoryRequirements(
+        device,
+        &vk.DeviceBufferMemoryRequirements{
+            .p_create_info = &surface_buffer_create_info,
+        },
+        &surface_memory_requirements,
+    );
+    const surface_memory = try vkd.allocateMemory(
+        device,
+        &vk.MemoryAllocateInfo{
+            .allocation_size = surface_memory_requirements.memory_requirements.size,
+            .memory_type_index = try findMemoryTypeIndex(
+                surface_memory_requirements.memory_requirements.memory_type_bits,
+                vk.MemoryPropertyFlags{
+                    .device_local_bit = true,
+                },
+                physical_device_memory_properties,
+            ),
+        },
+        null,
+    );
+    defer vkd.freeMemory(
+        device,
+        surface_memory,
+        null,
+    );
+    const surface_buffer = try vkd.createBuffer(
+        device,
+        &surface_buffer_create_info,
+        null,
+    );
+    defer vkd.destroyBuffer(
+        device,
+        surface_buffer,
+        null,
+    );
+
+    _ = try vkd.bindBufferMemory2(
+        device,
+        1,
+        @ptrCast(&vk.BindBufferMemoryInfo{
+            .buffer = surface_buffer,
+            .memory = surface_memory,
+            .memory_offset = 0,
+        }),
+    );
+    var transfer_surface: bool = true;
 
     const pipeline_layout = try vkd.createPipelineLayout(
         device,
@@ -649,7 +895,7 @@ pub fn main() !void {
             .base_pipeline_index = undefined,
             .layout = pipeline_layout,
             .p_input_assembly_state = &vk.PipelineInputAssemblyStateCreateInfo{
-                .topology = .triangle_list,
+                .topology = .triangle_strip,
                 .primitive_restart_enable = vk.FALSE,
             },
             .p_color_blend_state = &vk.PipelineColorBlendStateCreateInfo{
@@ -690,7 +936,21 @@ pub fn main() !void {
                 .min_depth_bounds = 0.0,
                 .max_depth_bounds = 1.0,
             },
-            .p_vertex_input_state = &vk.PipelineVertexInputStateCreateInfo{},
+            .p_vertex_input_state = &vk.PipelineVertexInputStateCreateInfo{
+                .vertex_attribute_description_count = 1,
+                .vertex_binding_description_count = 1,
+                .p_vertex_attribute_descriptions = @ptrCast(&vk.VertexInputAttributeDescription{
+                    .binding = 0,
+                    .format = .r32_uint,
+                    .location = 0,
+                    .offset = 0,
+                }),
+                .p_vertex_binding_descriptions = @ptrCast(&vk.VertexInputBindingDescription{
+                    .binding = 0,
+                    .stride = @sizeOf(Surface),
+                    .input_rate = .instance,
+                }),
+            },
             .p_rasterization_state = &vk.PipelineRasterizationStateCreateInfo{
                 .cull_mode = .{ .back_bit = true },
                 .front_face = .counter_clockwise,
@@ -806,6 +1066,10 @@ pub fn main() !void {
 
     var frame: u1 = 0;
     var time = nanoTimestamp();
+
+    camera_uniform.position.x = 8.0;
+    camera_uniform.position.y = side_len - 2.0;
+    camera_uniform.position.z = 8.0;
 
     while (true) {
         if (display.roundtrip() != .SUCCESS) return error.RoundtripFailed;
@@ -954,11 +1218,11 @@ pub fn main() !void {
                         );
                         vkd.freeMemory(
                             device,
-                            depth_image_memory,
+                            depth_memory,
                             null,
                         );
                     }
-                    var depth_image_memory_requirements: vk.MemoryRequirements2 = .{
+                    var depth_memory_requirements: vk.MemoryRequirements2 = .{
                         .memory_requirements = undefined,
                     };
                     const depth_image_create_info: vk.ImageCreateInfo = .{
@@ -993,15 +1257,15 @@ pub fn main() !void {
                                 .depth_bit = true,
                             },
                         },
-                        &depth_image_memory_requirements,
+                        &depth_memory_requirements,
                     );
 
-                    depth_image_memory = try vkd.allocateMemory(
+                    depth_memory = try vkd.allocateMemory(
                         device,
                         &vk.MemoryAllocateInfo{
-                            .allocation_size = depth_image_memory_requirements.memory_requirements.size,
+                            .allocation_size = depth_memory_requirements.memory_requirements.size,
                             .memory_type_index = try findMemoryTypeIndex(
-                                depth_image_memory_requirements.memory_requirements.memory_type_bits,
+                                depth_memory_requirements.memory_requirements.memory_type_bits,
                                 vk.MemoryPropertyFlags{
                                     .device_local_bit = true,
                                 },
@@ -1022,7 +1286,7 @@ pub fn main() !void {
                         &[_]vk.BindImageMemoryInfo{
                             vk.BindImageMemoryInfo{
                                 .image = depth_image,
-                                .memory = depth_image_memory,
+                                .memory = depth_memory,
                                 .memory_offset = 0,
                             },
                         },
@@ -1228,13 +1492,51 @@ pub fn main() !void {
             };
             image_memory_barriers_len += 1;
 
+            if (transfer_surface) {
+                vkd.cmdCopyBuffer2(
+                    command_buffers[frame],
+                    &vk.CopyBufferInfo2{
+                        .src_buffer = surface_transfer_buffer,
+                        .dst_buffer = surface_buffer,
+                        .region_count = 1,
+                        .p_regions = @ptrCast(&vk.BufferCopy2{
+                            .src_offset = 0,
+                            .dst_offset = 0,
+                            .size = surface_buffer_create_info.size,
+                        }),
+                    },
+                );
+            }
+
             vkd.cmdPipelineBarrier2(
                 command_buffers[frame],
                 &vk.DependencyInfo{
                     .image_memory_barrier_count = image_memory_barriers_len,
                     .p_image_memory_barriers = &image_memory_barriers,
+                    // .buffer_memory_barrier_count = if (transfer_surface) 1 else 0,
+                    // .p_buffer_memory_barriers = @ptrCast(&vk.BufferMemoryBarrier2{
+                    //     .buffer = surface_buffer,
+                    //     .offset = 0,
+                    //     .size = surface_buffer_create_info.size,
+                    //     .src_stage_mask = .{
+                    //         .copy_bit = true,
+                    //     },
+                    //     .dst_stage_mask = .{
+                    //         .vertex_input_bit = true,
+                    //     },
+                    //     .src_access_mask = .{
+                    //         .transfer_write_bit = true,
+                    //     },
+                    //     .dst_access_mask = .{
+                    //         .vertex_attribute_read_bit = true,
+                    //     },
+                    //     .src_queue_family_index = 0,
+                    //     .dst_queue_family_index = 0,
+                    // }),
                 },
             );
+
+            transfer_surface = false;
 
             {
                 vkd.cmdBeginRendering(command_buffers[frame], &vk.RenderingInfo{
@@ -1315,13 +1617,23 @@ pub fn main() !void {
                         .first_set = 0,
                         .set_count = 1,
                         .layout = pipeline_layout,
-                        .stage_flags = .{ .vertex_bit = true },
+                        .stage_flags = .{
+                            .vertex_bit = true,
+                        },
                         .p_buffer_indices = &[_]u32{0},
                         .p_offsets = &[_]vk.DeviceSize{0},
                     },
                 );
 
-                vkd.cmdDraw(command_buffers[frame], 6, 1, 0, 0);
+                vkd.cmdBindVertexBuffers(
+                    command_buffers[frame],
+                    0,
+                    1,
+                    @ptrCast(&surface_buffer),
+                    @ptrCast(&@as(vk.DeviceSize, 0)),
+                );
+
+                vkd.cmdDraw(command_buffers[frame], 4, surfaces_len, 0, 0);
 
                 vkd.cmdEndRendering(command_buffers[frame]);
             }
@@ -1564,4 +1876,35 @@ fn findMemoryTypeIndex(
         }
     }
     return error.MemoryTypeIndex;
+}
+
+inline fn pdep(comptime T: type, src: T, mask: T) T {
+    if (T != u64 and T != u32 and T != usize) {
+        @compileError("pdep only implemented for u32 and u64");
+    }
+    return asm volatile ("pdep %[mask], %[src], %[dst]"
+        // Map to actual registers:
+        : [dst] "=r" (-> T),
+        : [src] "r" (src),
+          [mask] "r" (mask),
+    );
+}
+
+inline fn pext(comptime T: type, src: T, mask: T) T {
+    if (T != u64 and T != u32 and T != usize) {
+        @compileError("pext only implemented for u32 and u64");
+    }
+    return asm volatile ("pext %[mask], %[src], %[dst]"
+        // Map to actual registers:
+        : [dst] "=r" (-> T),
+        : [src] "r" (src),
+          [mask] "r" (mask),
+    );
+}
+
+fn UnsignedInt(bits: comptime_int) type {
+    return @Type(.{ .int = .{
+        .bits = bits,
+        .signedness = .unsigned,
+    } });
 }

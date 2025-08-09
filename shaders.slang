@@ -1,49 +1,82 @@
 struct Camera {
-	float3 position;
+	vector<float32_t, 3> position;
 
-	float z_near;
+	float32_t z_near;
 
-	float czx;
-	float szx;
-	float czy;
-	float szy;
+	float32_t czx;
+	float32_t szx;
+	float32_t czy;
+	float32_t szy;
 
-	float2 scale;
+	vector<float32_t, 2> scale;
 };
+
 [[vk::binding(0,0)]]
 ConstantBuffer<Camera> camera;
 
 struct VSOutput {
-	float4 position: SV_Position;
-	float3 color;
+	vector<float32_t, 4> position: SV_Position;
+	nointerpolation vector<float32_t, 3> color;
 };
 
-static const float3 positions[] = {
-	float3( 6.0,  2.0, 4.0),
-	float3( 0.0, -2.0, 2.0),
-	float3(-6.0,  2.0, 4.0),
-
-	float3( 4.0,  5.0, 3.0),
-	float3( 0.0, -10.0, 5.0),
-	float3(-4.0,  5.0, 3.0),
+static const vector<int8_t, 3> positions[] = {
+	{0,0,0},
+	{0,1,0},
+	{1,0,0},
+	{1,1,0},
 };
 
-static const float3 colors[] = {
-	float3(1.0, 0.0, 1.0),
-	float3(0.0, 1.0, 0.0),
-	float3(0.0, 0.0, 1.0),
-
-	float3(1.0, 0.0, 0.0),
-	float3(0.0, 1.0, 1.0),
-	float3(1.0, 1.0, 0.0),
+static const vector<float32_t, 3> colors[] = {
+	{1.0, 0.0, 0.0},
+	{0.0, 1.0, 0.0},
+	{0.0, 0.0, 1.0},
 };
+
+struct VSInput {
+	[[vk::location(0)]]
+	uint32_t surface;
+};
+
+static const uint log_side_len = 0x5;
+static const uint dimensions = 3;
+static const uint log_dimensions_len = uint(ceil(log(float(dimensions))));
 
 [shader("vertex")]
-VSOutput vertexMain(uint id: SV_VertexID) {
+VSOutput vertexMain(VSInput input, uint32_t vertex_id: SV_VertexID) {
 	VSOutput output;
-	float3 position = positions[id] - camera.position;
 
-	float x, y, z;
+	vector<float32_t, 3> position;
+
+	uint surface = input.surface;
+	uint direction_sign = surface & 1;
+	surface >>= 1;
+	uint direction = surface & ((1 << log_dimensions_len) - 1);
+	surface >>= log_dimensions_len;
+	for (int dimension_i = dimensions - 1; dimension_i != -1; dimension_i -= 1) {
+		position[dimension_i] = float(surface & ((1 << log_side_len) - 1));
+		surface >>= log_side_len;
+	}
+	position[direction] += direction_sign;
+
+	if (direction_sign == 1) {
+		switch (vertex_id) {
+			case 1:
+				vertex_id = 2;
+				break;
+			case 2: 
+				vertex_id = 1;
+		}
+	}
+	position[(direction + 2) % dimensions] += float((vertex_id & 0b01) >> 0);
+	position[(direction + 1) % dimensions] += float((vertex_id & 0b10) >> 1);
+
+	position -= camera.position;
+
+	for (uint dimension_i = 0; dimension_i != dimensions; dimension_i += 1) {
+		output.color[dimension_i] = float(direction_sign ^ (dimension_i != direction));
+	}
+
+	float32_t x, y, z;
 
 	z = position.z;
 	x = position.x;
@@ -60,17 +93,16 @@ VSOutput vertexMain(uint id: SV_VertexID) {
 	position.x *= camera.scale.x;
 	position.y *= camera.scale.y;
 
-	output.position = float4(
+	output.position = {
 		position.x,
 		position.y,
 		camera.z_near,
 		position.z,
-	);
-	output.color = colors[id];
+	};
 	return output;
 }
 
 [shader("fragment")]
-float4 fragmentMain(VSOutput input) {
+vector<float32_t, 4> fragmentMain(VSOutput input) {
 	return float4(input.color, 1.0);
 }
