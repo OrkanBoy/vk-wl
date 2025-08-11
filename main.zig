@@ -22,20 +22,56 @@ const RegistryListenerData = struct {
     relative_pointer_manager_v1: *zwp.RelativePointerManagerV1,
     pointer_constraints_v1: *zwp.PointerConstraintsV1,
 };
+const Surface = packed struct {
+    combined_indices: CombinedIndices,
+    direction: Direction,
+    direction_sign: u1,
+    surrounding_air: SurroundingAir,
+    direction_hints: DirectionHints,
+};
+const CombinedIndices = UnsignedInt(dimensions * log_side_len);
+const Direction = UnsignedInt(log2_int_ceil(usize, dimensions));
+const SurroundingAir = UnsignedInt(log2_int_ceil(usize, dimensions * 2));
+const DirectionHints = UnsignedInt((dimensions - 1) * 2);
+
+const LogUsize = std.math.Log2Int(usize);
 
 const clamp = std.math.clamp;
+
 const rotate_factor = 1 << 0x10;
-const range_rotate_factor = 1 << 0x10;
+const range_rotate_factor = 1 << 0x12;
+
 const rotate_unit: i32 = @intFromFloat(tau * rotate_factor);
 const range_rotate_unit: i32 = @intFromFloat(tau * range_rotate_factor);
 
-const camera = struct {
-    const Uniform = extern struct {
-        position: extern struct {
-            x: f32,
-            y: f32,
-            z: f32,
-        },
+const dimensions = 3;
+
+const log_side_len = 0x5;
+const side_len = 1 << log_side_len;
+
+const log_volume_len = log_side_len * dimensions;
+const volume_len = 1 << log_volume_len;
+
+const morton_mask: CombinedIndices = _: {
+    var value: usize = 0;
+    for (0..log_side_len) |_| {
+        value <<= dimensions;
+        value |= 1;
+    }
+    break :_ value;
+};
+
+const Voxel = enum {
+    Air,
+    Stone,
+};
+
+const Uniform = extern struct {
+    light: extern struct {
+        affine: [dimensions * (dimensions + 1)]f32,
+    },
+    camera: extern struct {
+        position: [dimensions]f32,
 
         z_near: f32,
 
@@ -48,17 +84,12 @@ const camera = struct {
             x: f32,
             y: f32,
         },
-    };
-
+    },
+};
+const camera = struct {
     const Keyboard = struct {
-        x_pos: bool,
-        x_neg: bool,
-
-        y_pos: bool,
-        y_neg: bool,
-
-        z_pos: bool,
-        z_neg: bool,
+        positive: [dimensions]bool,
+        negative: [dimensions]bool,
 
         locked_pointer_toggle: bool,
     };
@@ -69,6 +100,10 @@ const camera = struct {
     };
     const Pointer = struct {
         dzx_half_range: i32,
+        speedup: bool,
+        speeddown: bool,
+        destroy: bool,
+        create: bool,
     };
 };
 
@@ -90,15 +125,8 @@ pub fn main() !void {
     defer keyboard.destroy();
 
     var camera_keyboard: camera.Keyboard = .{
-        .x_pos = false,
-        .x_neg = false,
-
-        .y_pos = false,
-        .y_neg = false,
-
-        .z_pos = false,
-        .z_neg = false,
-
+        .positive = [_]bool{false} ** dimensions,
+        .negative = [_]bool{false} ** dimensions,
         .locked_pointer_toggle = false,
     };
     keyboard.setListener(
@@ -112,6 +140,10 @@ pub fn main() !void {
 
     var camera_pointer: camera.Pointer = .{
         .dzx_half_range = 0,
+        .speedup = false,
+        .speeddown = false,
+        .create = false,
+        .destroy = false,
     };
     var camera_zx_half_range: i32 = range_rotate_unit / 6;
     pointer.setListener(
@@ -420,7 +452,7 @@ pub fn main() !void {
         .sharing_mode = .exclusive,
         .queue_family_index_count = 1,
         .p_queue_family_indices = &[_]u32{0},
-        .size = @sizeOf(camera.Uniform),
+        .size = @sizeOf(Uniform),
     };
     vkd.getDeviceBufferMemoryRequirements(
         device,
@@ -473,11 +505,11 @@ pub fn main() !void {
         }),
     );
 
-    const camera_uniform: *camera.Uniform = @ptrCast(@alignCast(try vkd.mapMemory2(device, &vk.MemoryMapInfo{
+    const uniform: *Uniform = @ptrCast(@alignCast(try vkd.mapMemory2(device, &vk.MemoryMapInfo{
         .flags = .{},
         .memory = camera_memory,
         .offset = 0,
-        .size = @sizeOf(camera.Uniform),
+        .size = @sizeOf(Uniform),
     })));
 
     const descriptor_set_layout_bindings = [_]vk.DescriptorSetLayoutBinding{
@@ -594,7 +626,7 @@ pub fn main() !void {
             .data = .{
                 .p_uniform_buffer = &vk.DescriptorAddressInfoEXT{
                     .format = .undefined,
-                    .range = @sizeOf(camera.Uniform),
+                    .range = @sizeOf(Uniform),
                     .address = vkd.getBufferDeviceAddress(
                         device,
                         &vk.BufferDeviceAddressInfo{
@@ -607,76 +639,27 @@ pub fn main() !void {
         physical_device_descriptor_buffer_properties.uniform_buffer_descriptor_size,
         @ptrCast(descriptor_buffer_mapped),
     );
-
-    const Voxel = enum {
-        Air,
-        Stone,
-    };
-    const dimensions = 3;
-
-    const log_side_len = 0x5;
-    const side_len = 1 << log_side_len;
-
-    const log_volume_len = log_side_len * dimensions;
-    const volume_len = 1 << log_volume_len;
-
-    const morton_mask: usize = comptime blk: {
-        var value: usize = 0;
-        for (0..log_side_len) |_| {
-            value <<= dimensions;
-            value |= 1;
-        }
-        break :blk value;
-    };
-
     const allocator = std.heap.page_allocator;
     var voxels = try allocator.alloc(Voxel, volume_len);
     defer allocator.free(voxels);
 
-    const LogUsize = std.math.Log2Int(usize);
     for (0..volume_len) |voxel_i| {
         var sum: usize = 0;
         for (0..dimensions) |_dimension_i| {
-            const dimension_i: LogUsize = @truncate(_dimension_i);
+            const dimension_i: Direction = @truncate(_dimension_i);
             const coord = pext(usize, voxel_i, morton_mask << dimension_i);
             sum += coord * coord;
         }
         const max_sum = 1 << (2 * log_side_len);
         voxels[voxel_i] = if (sum > max_sum or sum < max_sum / 3) Voxel.Stone else Voxel.Air;
     }
-    voxels[0] = Voxel.Stone;
-
-    var surfaces_len: u32 = 0;
-    for (0..volume_len) |voxel_i| {
-        if (voxels[voxel_i] == Voxel.Air) {
-            continue;
-        }
-        for (0..dimensions) |_dimension_i| {
-            const dimension_i: LogUsize = @truncate(_dimension_i);
-            const mask = morton_mask << dimension_i;
-            const coord = pext(usize, voxel_i, mask);
-            const cleaned_voxel_i = voxel_i & ~mask;
-
-            if (coord == 0 or
-                voxels[cleaned_voxel_i | pdep(usize, coord - 1, mask)] == Voxel.Air)
-            {
-                surfaces_len += 1;
-            }
-            if (coord == side_len - 1 or
-                voxels[cleaned_voxel_i | pdep(usize, coord + 1, mask)] == Voxel.Air)
-            {
-                surfaces_len += 1;
-            }
-        }
-    }
 
     // const PartialVoxelId = UnsignedInt(log_side_len);
-    const Surface = UnsignedInt((dimensions * log_side_len) + (1 + log2_int_ceil(usize, dimensions)));
-    // const Surface = struct {
-    //     position: [dimensions]u8,
-    //     direction: u8,
-    // };
-
+    // factor of 2 is completely arbitrary
+    // it's to allow modification of mesh once memory been allocated
+    // TODO: fix, more dynamic voxel set modification, and mesh generation
+    var surfaces_len = computeSurfacesLen(voxels.ptr);
+    const surfaces_len_saturated = surfaces_len * 2;
     const surface_transfer_buffer_create_info: vk.BufferCreateInfo = .{
         .flags = .{},
         .usage = .{
@@ -685,7 +668,7 @@ pub fn main() !void {
         .sharing_mode = .exclusive,
         .queue_family_index_count = 1,
         .p_queue_family_indices = &[_]u32{0},
-        .size = @sizeOf(Surface) * surfaces_len,
+        .size = @sizeOf(Surface) * surfaces_len_saturated,
     };
     var surface_transfer_memory_requirements: vk.MemoryRequirements2 = .{
         .memory_requirements = undefined,
@@ -744,47 +727,7 @@ pub fn main() !void {
             .flags = .{},
             .offset = 0,
         },
-    ))))[0..surfaces_len];
-
-    var surface_i: usize = 0;
-    for (0..volume_len) |voxel_i| {
-        if (voxels[voxel_i] == Voxel.Air) {
-            continue;
-        }
-
-        var surface: Surface = 0;
-        // var surface: Surface = undefined;
-        for (0..dimensions) |_dimension_i| {
-            const dimension_i: LogUsize = @truncate(_dimension_i);
-            // surface[dimension_i] = pext(usize, voxel_i, morton_mask << dimension_i);
-            surface <<= log_side_len;
-            surface |= @truncate(pext(usize, voxel_i, morton_mask << dimension_i));
-        }
-        surface <<= 1 + comptime log2_int_ceil(usize, dimensions);
-        for (0..dimensions) |_dimension_i| {
-            const dimension_i: LogUsize = @truncate(_dimension_i);
-            const mask = morton_mask << dimension_i;
-            const coord = pext(usize, voxel_i, mask);
-
-            const cleaned_voxel_i = voxel_i & ~mask;
-
-            if (coord == 0 or
-                voxels[cleaned_voxel_i | pdep(usize, coord - 1, mask)] == Voxel.Air)
-            {
-                surface_transfer_memory_mapped[surface_i] = surface | (dimension_i << 1) | 0;
-                // surface_transfer_memory_mapped[surface_i] = 1;
-                surface_i += 1;
-            }
-            if (coord == side_len - 1 or
-                voxels[cleaned_voxel_i | pdep(usize, coord + 1, mask)] == Voxel.Air)
-            {
-                surface_transfer_memory_mapped[surface_i] = surface | (dimension_i << 1) | 1;
-
-                // surface_transfer_memory_mapped[surface_i] = 1;
-                surface_i += 1;
-            }
-        }
-    }
+    ))));
 
     var surface_buffer_create_info: vk.BufferCreateInfo = .{
         .flags = .{},
@@ -846,9 +789,8 @@ pub fn main() !void {
             .memory_offset = 0,
         }),
     );
-    var transfer_surface: bool = true;
 
-    const pipeline_layout = try vkd.createPipelineLayout(
+    const color_pipeline_layout = try vkd.createPipelineLayout(
         device,
         &vk.PipelineLayoutCreateInfo{
             .set_layout_count = 1,
@@ -858,9 +800,9 @@ pub fn main() !void {
         },
         null,
     );
-    defer vkd.destroyPipelineLayout(device, pipeline_layout, null);
+    defer vkd.destroyPipelineLayout(device, color_pipeline_layout, null);
 
-    var pipeline: vk.Pipeline = undefined;
+    var color_pipeline: vk.Pipeline = undefined;
     const shaders_spv align(@alignOf(u32)) = @embedFile("shaders").*;
 
     const vertex_shader = try vkd.createShaderModule(
@@ -893,7 +835,7 @@ pub fn main() !void {
             },
             .base_pipeline_handle = .null_handle,
             .base_pipeline_index = undefined,
-            .layout = pipeline_layout,
+            .layout = color_pipeline_layout,
             .p_input_assembly_state = &vk.PipelineInputAssemblyStateCreateInfo{
                 .topology = .triangle_strip,
                 .primitive_restart_enable = vk.FALSE,
@@ -983,12 +925,12 @@ pub fn main() !void {
             .stage_count = 2,
             .p_stages = &[_]vk.PipelineShaderStageCreateInfo{
                 vk.PipelineShaderStageCreateInfo{
-                    .p_name = "vertexMain",
+                    .p_name = "vertexColor",
                     .stage = .{ .vertex_bit = true },
                     .module = vertex_shader,
                 },
                 vk.PipelineShaderStageCreateInfo{
-                    .p_name = "fragmentMain",
+                    .p_name = "fragmentColor",
                     .stage = .{ .fragment_bit = true },
                     .module = fragment_shader,
                 },
@@ -1004,9 +946,9 @@ pub fn main() !void {
             },
         }),
         null,
-        @ptrCast(&pipeline),
+        @ptrCast(&color_pipeline),
     );
-    defer vkd.destroyPipeline(device, pipeline, null);
+    defer vkd.destroyPipeline(device, color_pipeline, null);
 
     defer vkd.destroySwapchainKHR(device, swapchain, null);
     defer for (0..swapchain_images_count) |i| {
@@ -1067,10 +1009,14 @@ pub fn main() !void {
     var frame: u1 = 0;
     var time = nanoTimestamp();
 
-    camera_uniform.position.x = 8.0;
-    camera_uniform.position.y = side_len - 2.0;
-    camera_uniform.position.z = 8.0;
+    var camera_speed: f32 = 4.0;
 
+    const side: f32 = (side_len / @sqrt(@as(f32, @floatFromInt(dimensions)))) - 2.0;
+    uniform.camera.position[0] = side;
+    uniform.camera.position[1] = side;
+    uniform.camera.position[2] = side;
+
+    var surfaces_regenerate = true;
     while (true) {
         if (display.roundtrip() != .SUCCESS) return error.RoundtripFailed;
 
@@ -1100,16 +1046,16 @@ pub fn main() !void {
                 camera_zy += camera_relative_pointer_v1.dzy;
                 camera_zy = clamp(
                     camera_zy,
-                    -rotate_unit / 5,
-                    rotate_unit / 5,
+                    -(rotate_unit / 4) * 0xf / 0x10,
+                    (rotate_unit / 4) * 0xf / 0x10,
                 );
 
                 camera_zx_half_range += camera_pointer.dzx_half_range;
 
                 camera_zx_half_range = clamp(
                     camera_zx_half_range,
-                    range_rotate_unit / 8,
-                    range_rotate_unit / 5,
+                    range_rotate_unit / 0xd,
+                    range_rotate_unit / 0x4,
                 );
 
                 camera_relative_pointer_v1.dzx = 0;
@@ -1129,44 +1075,127 @@ pub fn main() !void {
             if (locked_pointer != null) {
                 const dt: f32 = @as(f32, @floatFromInt(delta_time)) / 1_000_000_000.0;
 
-                const dz = @cos(zx) * @cos(zy) * dt;
-                const dx = @sin(zx) * @cos(zy) * dt;
-
-                if (camera_keyboard.x_pos and !camera_keyboard.x_neg) {
-                    camera_uniform.position.z -= dx;
-                    camera_uniform.position.x += dz;
-                } else if (!camera_keyboard.x_pos and camera_keyboard.x_neg) {
-                    camera_uniform.position.z += dx;
-                    camera_uniform.position.x -= dz;
+                if (camera_pointer.speedup and !camera_pointer.speeddown) {
+                    camera_speed += dt;
+                } else if (!camera_pointer.speedup and camera_pointer.speeddown) {
+                    camera_speed -= dt;
+                    camera_speed = @max(0.0, camera_speed);
                 }
 
-                if (camera_keyboard.y_pos and !camera_keyboard.y_neg) {
-                    camera_uniform.position.y += dt;
-                } else if (!camera_keyboard.y_pos and camera_keyboard.y_neg) {
-                    camera_uniform.position.y -= dt;
+                const ds = camera_speed * dt;
+
+                var d: [dimensions]f32 = [_]f32{
+                    @sin(zx) * @cos(zy),
+                    1.0,
+                    @cos(zx) * @cos(zy),
+                };
+                for (&d) |*v| {
+                    v.* *= ds;
                 }
 
-                if (camera_keyboard.z_pos and !camera_keyboard.z_neg) {
-                    camera_uniform.position.z += dz;
-                    camera_uniform.position.x += dx;
-                } else if (!camera_keyboard.z_pos and camera_keyboard.z_neg) {
-                    camera_uniform.position.z -= dz;
-                    camera_uniform.position.x -= dx;
+                if (camera_keyboard.positive[0] and !camera_keyboard.negative[0]) {
+                    uniform.camera.position[2] -= d[0];
+                    uniform.camera.position[0] += d[2];
+                } else if (!camera_keyboard.positive[0] and camera_keyboard.negative[0]) {
+                    uniform.camera.position[2] += d[0];
+                    uniform.camera.position[0] -= d[2];
+                }
+
+                if (camera_keyboard.positive[1] and !camera_keyboard.negative[1]) {
+                    uniform.camera.position[1] += d[1];
+                } else if (!camera_keyboard.positive[1] and camera_keyboard.negative[1]) {
+                    uniform.camera.position[1] -= d[1];
+                }
+
+                if (camera_keyboard.positive[2] and !camera_keyboard.negative[2]) {
+                    uniform.camera.position[2] += d[2];
+                    uniform.camera.position[0] += d[0];
+                } else if (!camera_keyboard.positive[2] and camera_keyboard.negative[2]) {
+                    uniform.camera.position[2] -= d[2];
+                    uniform.camera.position[0] -= d[0];
                 }
             }
 
-            const camera_size_x: f32 = 1.0;
-            camera_uniform.z_near = camera_size_x / @tan(zx_half_range);
-            camera_uniform.scale.x = camera_uniform.z_near / camera_size_x;
-            camera_uniform.scale.y = camera_uniform.scale.x *
+            if (camera_pointer.create != camera_pointer.destroy) {
+                const origin = uniform.camera.position;
+                var indices: [dimensions]usize = undefined;
+                var combined_indices: usize = 0;
+
+                const direction: [dimensions]f32 = [_]f32{
+                    @sin(zx) * @cos(zy),
+                    @sin(zy),
+                    @cos(zx) * @cos(zy),
+                };
+
+                var planes: [dimensions]f32 = undefined;
+                for (0..dimensions) |dimension_i| {
+                    planes[dimension_i] =
+                        if (direction[dimension_i] > 0.0)
+                            @ceil(origin[dimension_i])
+                        else
+                            @floor(origin[dimension_i]);
+
+                    indices[dimension_i] = @intFromFloat(origin[dimension_i]);
+                    combined_indices |= pdep(usize, indices[dimension_i], morton_mask << @truncate(dimension_i));
+                }
+
+                var old_combined_indices: ?usize = null;
+                while (true) {
+                    if (voxels[combined_indices] != Voxel.Air) {
+                        if (camera_pointer.destroy) {
+                            voxels[combined_indices] = Voxel.Air;
+                        } else if (old_combined_indices != null) {
+                            voxels[old_combined_indices.?] = Voxel.Stone;
+                        }
+                        surfaces_regenerate = true;
+                        break;
+                    }
+                    var t_min: f32 = std.math.inf(f32);
+                    var dimension_i_min: usize = undefined;
+                    for (0..dimensions) |dimension_i| {
+                        const t = (planes[dimension_i] - origin[dimension_i]) / direction[dimension_i];
+                        if (t < t_min) {
+                            t_min = t;
+                            dimension_i_min = dimension_i;
+                        }
+                    }
+                    if (direction[dimension_i_min] > 0.0) {
+                        if (indices[dimension_i_min] == side_len - 1) break;
+                        planes[dimension_i_min] += 1.0;
+                        indices[dimension_i_min] += 1;
+                    } else {
+                        if (indices[dimension_i_min] == 0) break;
+                        planes[dimension_i_min] -= 1.0;
+                        indices[dimension_i_min] -= 1;
+                    }
+                    const mask = morton_mask << @truncate(dimension_i_min);
+
+                    old_combined_indices = combined_indices;
+                    combined_indices &= ~mask;
+                    combined_indices |= pdep(usize, indices[dimension_i_min], mask);
+                }
+            }
+
+            camera_pointer.create = false;
+            camera_pointer.destroy = false;
+
+            if (surfaces_regenerate) {
+                surfaces_len = computeSurfacesLen(voxels.ptr);
+                generateSurfaces(voxels.ptr, surface_transfer_memory_mapped);
+            }
+
+            const camera_size_x: f32 = 0.2;
+            uniform.camera.z_near = camera_size_x / @tan(zx_half_range);
+            uniform.camera.scale.x = uniform.camera.z_near / camera_size_x;
+            uniform.camera.scale.y = uniform.camera.scale.x *
                 @as(f32, @floatFromInt(swapchain_extent.width)) /
                 @as(f32, @floatFromInt(swapchain_extent.height));
 
-            camera_uniform.czx = @cos(zx);
-            camera_uniform.szx = @sin(zx);
+            uniform.camera.czx = @cos(zx);
+            uniform.camera.szx = @sin(zx);
 
-            camera_uniform.czy = @cos(zy);
-            camera_uniform.szy = @sin(zy);
+            uniform.camera.czy = @cos(zy);
+            uniform.camera.szy = @sin(zy);
         }
 
         var image_memory_barriers: [2]vk.ImageMemoryBarrier2 = undefined;
@@ -1492,7 +1521,7 @@ pub fn main() !void {
             };
             image_memory_barriers_len += 1;
 
-            if (transfer_surface) {
+            if (surfaces_regenerate) {
                 vkd.cmdCopyBuffer2(
                     command_buffers[frame],
                     &vk.CopyBufferInfo2{
@@ -1506,6 +1535,8 @@ pub fn main() !void {
                         }),
                     },
                 );
+                // TODO: transfers can conflict if command_buffers[0] does transfer and command_buffers[1] also does transfer
+                surfaces_regenerate = false;
             }
 
             vkd.cmdPipelineBarrier2(
@@ -1513,30 +1544,28 @@ pub fn main() !void {
                 &vk.DependencyInfo{
                     .image_memory_barrier_count = image_memory_barriers_len,
                     .p_image_memory_barriers = &image_memory_barriers,
-                    // .buffer_memory_barrier_count = if (transfer_surface) 1 else 0,
-                    // .p_buffer_memory_barriers = @ptrCast(&vk.BufferMemoryBarrier2{
-                    //     .buffer = surface_buffer,
-                    //     .offset = 0,
-                    //     .size = surface_buffer_create_info.size,
-                    //     .src_stage_mask = .{
-                    //         .copy_bit = true,
-                    //     },
-                    //     .dst_stage_mask = .{
-                    //         .vertex_input_bit = true,
-                    //     },
-                    //     .src_access_mask = .{
-                    //         .transfer_write_bit = true,
-                    //     },
-                    //     .dst_access_mask = .{
-                    //         .vertex_attribute_read_bit = true,
-                    //     },
-                    //     .src_queue_family_index = 0,
-                    //     .dst_queue_family_index = 0,
-                    // }),
+                    .buffer_memory_barrier_count = 1,
+                    .p_buffer_memory_barriers = @ptrCast(&vk.BufferMemoryBarrier2{
+                        .buffer = surface_buffer,
+                        .offset = 0,
+                        .size = surface_buffer_create_info.size,
+                        .src_stage_mask = .{
+                            .copy_bit = true,
+                        },
+                        .dst_stage_mask = .{
+                            .copy_bit = true,
+                        },
+                        .src_access_mask = .{
+                            .transfer_write_bit = true,
+                        },
+                        .dst_access_mask = .{
+                            .transfer_write_bit = true,
+                        },
+                        .src_queue_family_index = 0,
+                        .dst_queue_family_index = 0,
+                    }),
                 },
             );
-
-            transfer_surface = false;
 
             {
                 vkd.cmdBeginRendering(command_buffers[frame], &vk.RenderingInfo{
@@ -1601,7 +1630,7 @@ pub fn main() !void {
                     },
                 }));
 
-                vkd.cmdBindPipeline(command_buffers[frame], .graphics, pipeline);
+                vkd.cmdBindPipeline(command_buffers[frame], .graphics, color_pipeline);
 
                 vkd.cmdBindDescriptorBuffersEXT(
                     command_buffers[frame],
@@ -1616,7 +1645,7 @@ pub fn main() !void {
                     &vk.SetDescriptorBufferOffsetsInfoEXT{
                         .first_set = 0,
                         .set_count = 1,
-                        .layout = pipeline_layout,
+                        .layout = color_pipeline_layout,
                         .stage_flags = .{
                             .vertex_bit = true,
                         },
@@ -1778,12 +1807,12 @@ fn keyboardListener(
             // TODO: provide runtime binding of key values to fields
             const pressed = key.state == .pressed;
             switch (key.key) {
-                0x20 => camera_keyboard.x_pos = pressed,
-                0x1e => camera_keyboard.x_neg = pressed,
-                0x2a => camera_keyboard.y_pos = pressed,
-                0x39 => camera_keyboard.y_neg = pressed,
-                0x11 => camera_keyboard.z_pos = pressed,
-                0x1f => camera_keyboard.z_neg = pressed,
+                0x20 => camera_keyboard.positive[0] = pressed,
+                0x1e => camera_keyboard.negative[0] = pressed,
+                0x2a => camera_keyboard.positive[1] = pressed,
+                0x39 => camera_keyboard.negative[1] = pressed,
+                0x11 => camera_keyboard.positive[2] = pressed,
+                0x1f => camera_keyboard.negative[2] = pressed,
                 0x01 => camera_keyboard.locked_pointer_toggle = pressed,
                 else => {},
             }
@@ -1801,6 +1830,25 @@ fn pointerListener(
     switch (event) {
         .axis => |axis| if (axis.axis == .vertical_scroll) {
             camera_pointer.dzx_half_range = @intFromEnum(axis.value);
+        },
+        .button => |button| {
+            const pressed = button.state == .pressed;
+            switch (button.button) {
+                0x110 => {
+                    camera_pointer.destroy = pressed;
+                },
+                0x111 => {
+                    camera_pointer.create = pressed;
+                },
+                0x114 => {
+                    camera_pointer.speedup = pressed;
+                },
+                0x113 => {
+                    camera_pointer.speeddown = pressed;
+                },
+                else => {},
+            }
+            // print("button\t{x}\n", .{button.button});
         },
         else => {},
     }
@@ -1908,3 +1956,164 @@ fn UnsignedInt(bits: comptime_int) type {
         .signedness = .unsigned,
     } });
 }
+
+fn computeSurfacesLen(voxels: [*]const Voxel) u32 {
+    var surfaces_len: u32 = 0;
+    for (0..volume_len) |voxel_i| {
+        if (voxels[voxel_i] == Voxel.Air) {
+            continue;
+        }
+        for (0..dimensions) |_dimension_i| {
+            const dimension_i: Direction = @truncate(_dimension_i);
+            const mask = morton_mask << dimension_i;
+            const coord = pext(usize, voxel_i, mask);
+            const cleaned_voxel_i = voxel_i & ~mask;
+
+            if (coord == 0 or
+                voxels[cleaned_voxel_i | pdep(usize, coord - 1, mask)] == Voxel.Air)
+            {
+                surfaces_len += 1;
+            }
+            if (coord == side_len - 1 or
+                voxels[cleaned_voxel_i | pdep(usize, coord + 1, mask)] == Voxel.Air)
+            {
+                surfaces_len += 1;
+            }
+        }
+    }
+    return surfaces_len;
+}
+
+fn generateSurfaces(voxels: [*]const Voxel, surfaces: [*]Surface) void {
+    var surface_i: usize = 0;
+    for (0..volume_len) |voxel_i| {
+        if (voxels[voxel_i] == Voxel.Air) {
+            continue;
+        }
+
+        var combined_indices: CombinedIndices = 0;
+        for (0..dimensions) |_dimension_i| {
+            const dimension_i: Direction = @truncate(_dimension_i);
+            // surface[dimension_i] = pext(usize, voxel_i, morton_mask << dimension_i);
+            combined_indices <<= log_side_len;
+            combined_indices |= @truncate(pext(usize, voxel_i, morton_mask << dimension_i));
+        }
+        for (0..dimensions) |_direction| {
+            const direction: Direction = @truncate(_direction);
+            const mask = morton_mask << direction;
+            const coord = pext(usize, voxel_i, mask);
+
+            const cleaned_voxel_i = voxel_i & ~mask;
+
+            // if (coord == 0) {
+            //     surfaces[surface_i] = surface | (dimension_i << 1) | 0;
+            // } else {
+            //     const air_voxel_i = cleaned_voxel_i | pdep(usize, coord - 1, mask);
+            //     if (voxels[air_voxel_i] == Voxel.Air) {
+            //         const surrounding_air = computeSurroundingAir(voxels.ptr, air_voxel_i);
+            //     }
+            // }
+            {
+                var surface = Surface{
+                    .direction_sign = 0,
+                    .direction = direction,
+                    .combined_indices = combined_indices,
+                    .surrounding_air = undefined,
+                    .direction_hints = undefined,
+                };
+                if (coord == 0) {
+                    surface.surrounding_air = (dimensions << 1) - 1;
+                    surfaces[surface_i] = surface;
+                    surface_i += 1;
+                } else {
+                    const air_voxel_i = cleaned_voxel_i | pdep(usize, coord - 1, mask);
+                    if (voxels[air_voxel_i] == Voxel.Air) {
+                        surface.surrounding_air = computeSurroundingAir(voxels, air_voxel_i);
+                        surface.direction_hints = computeDirectionHints(voxels, voxel_i, direction);
+                        surfaces[surface_i] = surface;
+                        surface_i += 1;
+                    }
+                }
+            }
+            {
+                var surface = Surface{
+                    .direction_sign = 1,
+                    .direction = direction,
+                    .combined_indices = combined_indices,
+                    .surrounding_air = undefined,
+                    .direction_hints = undefined,
+                };
+                if (coord == side_len - 1) {
+                    surface.surrounding_air = (dimensions << 1) - 1;
+                    surfaces[surface_i] = surface;
+                    surface_i += 1;
+                } else {
+                    const air_voxel_i = cleaned_voxel_i | pdep(usize, coord + 1, mask);
+                    if (voxels[air_voxel_i] == Voxel.Air) {
+                        surface.surrounding_air = computeSurroundingAir(voxels, air_voxel_i);
+                        surface.direction_hints = computeDirectionHints(voxels, voxel_i, direction);
+                        surfaces[surface_i] = surface;
+                        surface_i += 1;
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn computeSurroundingAir(voxels: [*]const Voxel, voxel_i: usize) SurroundingAir {
+    var surrounding_air: SurroundingAir = 0;
+    for (0..dimensions) |_dimenion_i| {
+        const dimension_i: Direction = @truncate(_dimenion_i);
+        const mask = morton_mask << dimension_i;
+        const coord = pext(usize, voxel_i, mask);
+        const cleaned_voxel_i = voxel_i & ~mask;
+
+        // virtual air voxel at boundaries
+        if (coord == 0 or
+            voxels[cleaned_voxel_i | pdep(usize, coord - 1, mask)] == Voxel.Air)
+        {
+            surrounding_air += 1;
+        }
+        if (coord == side_len - 1 or
+            voxels[cleaned_voxel_i | pdep(usize, coord + 1, mask)] == Voxel.Air)
+        {
+            surrounding_air += 1;
+        }
+    }
+    if (surrounding_air >= dimensions << 1) {
+        @panic("wtf");
+    }
+
+    return surrounding_air;
+}
+
+fn computeDirectionHints(voxels: [*]const Voxel, voxel_i: usize, major_direction: Direction) DirectionHints {
+    var direction_hints: DirectionHints = 0;
+    for (0..dimensions) |_direction| {
+        const direction: Direction = @truncate(_direction);
+        if (major_direction == direction) {
+            continue;
+        }
+        const mask = morton_mask << direction;
+        const coord = pext(usize, voxel_i, mask);
+        const cleaned_voxel_i = voxel_i & ~mask;
+
+        direction_hints <<= 2;
+        direction_hints |= 1;
+
+        if (coord != 0 and
+            voxels[cleaned_voxel_i | pdep(usize, coord - 1, mask)] != Voxel.Air)
+        {
+            direction_hints += 1;
+        }
+        if (coord != side_len - 1 and
+            voxels[cleaned_voxel_i | pdep(usize, coord + 1, mask)] != Voxel.Air)
+        {
+            direction_hints -= 1;
+        }
+    }
+    return direction_hints;
+}
+
+fn computeLightAffine(_: camera.Uniform) void {}
