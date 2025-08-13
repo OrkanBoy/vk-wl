@@ -27,7 +27,6 @@ const Surface = packed struct {
     direction: Direction,
     direction_sign: u1,
     surrounding_air: SurroundingAir,
-    direction_hints: DirectionHints,
 };
 const CombinedIndices = UnsignedInt(directions * log_side_len);
 const Direction = UnsignedInt(log2_int_ceil(usize, directions));
@@ -69,6 +68,8 @@ const Voxel = enum {
 const Uniform = extern struct {
     light: extern struct {
         affine: [directions][directions + 1]f32,
+        direction: [directions]f32,
+        padding: u32,
     },
     camera: extern struct {
         position: [directions]f32,
@@ -1037,7 +1038,7 @@ pub fn main() !void {
                 },
                 .base_pipeline_handle = .null_handle,
                 .base_pipeline_index = undefined,
-                .layout = color_pipeline_layout,
+                .layout = shadow_pipeline_layout,
                 .p_input_assembly_state = &vk.PipelineInputAssemblyStateCreateInfo{
                     .topology = .triangle_strip,
                     .primitive_restart_enable = vk.FALSE,
@@ -1099,11 +1100,11 @@ pub fn main() !void {
                     .cull_mode = .{ .back_bit = true },
                     .front_face = .counter_clockwise,
                     .polygon_mode = .fill,
-                    .depth_bias_enable = vk.FALSE,
+                    .depth_bias_enable = vk.TRUE,
                     .depth_clamp_enable = vk.FALSE,
                     .depth_bias_clamp = 0.0,
-                    .depth_bias_constant_factor = 0.0,
-                    .depth_bias_slope_factor = 0.0,
+                    .depth_bias_constant_factor = 1.0,
+                    .depth_bias_slope_factor = 1.0,
                     .line_width = 1.0,
                     .rasterizer_discard_enable = vk.FALSE,
                 },
@@ -1266,8 +1267,8 @@ pub fn main() !void {
         null,
         &pipelines,
     );
-    const color_pipeline = pipelines[1];
     const shadow_pipeline = pipelines[0];
+    const color_pipeline = pipelines[1];
 
     defer for (pipelines) |pipeline| {
         vkd.destroyPipeline(
@@ -1540,6 +1541,7 @@ pub fn main() !void {
                 uniform.camera.cos[direction] = @cos(angles[direction]);
                 uniform.camera.sin[direction] = @sin(angles[direction]);
             }
+            uniform.light.direction = light_direction;
 
             camera_scale[1] = camera_scale[0] * @as(f32, @floatFromInt(swapchain_extent.height)) /
                 @as(f32, @floatFromInt(swapchain_extent.width));
@@ -1549,7 +1551,7 @@ pub fn main() !void {
                 light_direction,
                 angles,
                 uniform.camera.near,
-                uniform.camera.near + 5.0,
+                uniform.camera.near + 10.0,
                 camera_scale,
             );
         }
@@ -2552,7 +2554,6 @@ fn generateSurfaces(voxels: [*]const Voxel, surfaces: [*]Surface) void {
                     .direction = direction,
                     .combined_indices = combined_indices,
                     .surrounding_air = undefined,
-                    .direction_hints = undefined,
                 };
                 if (coord == 0) {
                     surface.surrounding_air = (directions << 1) - 1;
@@ -2562,7 +2563,6 @@ fn generateSurfaces(voxels: [*]const Voxel, surfaces: [*]Surface) void {
                     const air_voxel_i = cleaned_voxel_i | pdep(usize, coord - 1, mask);
                     if (voxels[air_voxel_i] == Voxel.Air) {
                         surface.surrounding_air = computeSurroundingAir(voxels, air_voxel_i);
-                        surface.direction_hints = computeDirectionHints(voxels, voxel_i, direction);
                         surfaces[surface_i] = surface;
                         surface_i += 1;
                     }
@@ -2574,7 +2574,6 @@ fn generateSurfaces(voxels: [*]const Voxel, surfaces: [*]Surface) void {
                     .direction = direction,
                     .combined_indices = combined_indices,
                     .surrounding_air = undefined,
-                    .direction_hints = undefined,
                 };
                 if (coord == side_len - 1) {
                     surface.surrounding_air = (directions << 1) - 1;
@@ -2584,7 +2583,6 @@ fn generateSurfaces(voxels: [*]const Voxel, surfaces: [*]Surface) void {
                     const air_voxel_i = cleaned_voxel_i | pdep(usize, coord + 1, mask);
                     if (voxels[air_voxel_i] == Voxel.Air) {
                         surface.surrounding_air = computeSurroundingAir(voxels, air_voxel_i);
-                        surface.direction_hints = computeDirectionHints(voxels, voxel_i, direction);
                         surfaces[surface_i] = surface;
                         surface_i += 1;
                     }
@@ -2742,11 +2740,8 @@ fn computeLightAffine(
                 &frustum[corner],
                 &light_frame[frame_direction],
             );
-            if (dot < min[frame_direction]) {
-                min[frame_direction] = dot;
-            } else if (dot > max[frame_direction]) {
-                max[frame_direction] = dot;
-            }
+            min[frame_direction] = @min(dot, min[frame_direction]);
+            max[frame_direction] = @max(dot, max[frame_direction]);
         }
     }
     // geometry box
@@ -2766,11 +2761,8 @@ fn computeLightAffine(
             &point,
             &light_frame[directions - 1],
         );
-        if (dot < min[directions - 1]) {
-            min[directions - 1] = dot;
-        } else if (dot > max[directions - 1]) {
-            max[directions - 1] = dot;
-        }
+        min[directions - 1] = @min(dot, min[directions - 1]);
+        max[directions - 1] = @max(dot, max[directions - 1]);
     }
 
     light_frame[directions - 1][directions] = -min[directions - 1];

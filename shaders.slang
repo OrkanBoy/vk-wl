@@ -1,16 +1,17 @@
 struct Camera {
   vector<float32_t, dimensions + 1> light_affine[dimensions];
+  vector<float32_t, dimensions> light_direction;
+  uint32_t padding;
 
   vector<float32_t, dimensions> position;
 
   float32_t near;
 
-  float32_t czx;
-  float32_t czy;
-  float32_t szx;
-  float32_t szy;
+  vector<float32_t, dimensions - 1> cos;
+  vector<float32_t, dimensions - 1> sin;
 
   vector<float32_t, dimensions - 1> scale;
+
 
   float32_t far;
 };
@@ -61,41 +62,21 @@ ColorVSOutput vertexColor(VSInput input, uint vertex_id: SV_VertexID) {
   surface >>= 1;
   float ambient =
       float(surface & ((1 << log_surrounding_air) - 1)) / max_surrounding_air;
-  surface >>= log_surrounding_air;
-  uint direction_hints = surface & ((1 << log_direction_hints) - 1);
+
 
   // camera is light source
   float3 camera_direction = {
-    camera.szx * camera.czy,
-    camera.szy,
-    camera.czx * camera.czy,
+    camera.sin[0] * camera.cos[1],
+    camera.sin[1],
+    camera.cos[0] * camera.cos[1],
   };
 
   float diffuse;
   if (direction_sign == 0) {
-    diffuse = camera_direction[direction];
+    diffuse = camera.light_direction[direction];
   } else {
-    diffuse = -camera_direction[direction];
+    diffuse = -camera.light_direction[direction];
   }
-  uint non_zero_diffuse_contributions = 1;
-  for (uint _direction_i = 0; _direction_i != dimensions; _direction_i += 1) {
-    uint direction_i = dimensions - 1 - _direction_i;
-
-    if (direction_i != direction) {
-      switch (direction_hints & 0b11) {
-      case 0b00:
-        diffuse += camera_direction[direction_i];
-        non_zero_diffuse_contributions += 1;
-        break;
-      case 0b10:
-        diffuse -= camera_direction[direction_i];
-        non_zero_diffuse_contributions += 1;
-        break;
-      }
-      direction_hints >>= 2;
-    }
-  }
-  diffuse /= sqrt(float(non_zero_diffuse_contributions));
   diffuse = max(0.0, diffuse);
 
   position[direction] += float(direction_sign);
@@ -126,13 +107,13 @@ ColorVSOutput vertexColor(VSInput input, uint vertex_id: SV_VertexID) {
 
   z = position.z;
   x = position.x;
-  position.z = z * camera.czx + x * camera.szx;
-  position.x = x * camera.czx - z * camera.szx;
+  position.z = z * camera.cos[0] + x * camera.sin[0];
+  position.x = x * camera.cos[0] - z * camera.sin[0];
 
   z = position.z;
   y = position.y;
-  position.z = z * camera.czy + y * camera.szy;
-  position.y = y * camera.czy - z * camera.szy;
+  position.z = z * camera.cos[1] + y * camera.sin[1];
+  position.y = y * camera.cos[1] - z * camera.sin[1];
 
   position.z += camera.near;
 
@@ -160,7 +141,7 @@ static const uint sample_area = (sample_side * 2 + 1) * (sample_side * 2 + 1);
 vector<float32_t, 4> fragmentColor(ColorVSOutput input) {
   float32_t x = input.light_position.x / 2.0 + 0.5;
   float32_t y = input.light_position.y / 2.0 + 0.5;
-  float32_t z = input.light_position.z - 0.001;
+  float32_t z = input.light_position.z;
 
   float light = shadow.SampleCmp(float2(x, y), z);
   return { input.diffuse_color * light + input.ambient_color, 1.0 };
