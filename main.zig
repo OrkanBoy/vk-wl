@@ -29,10 +29,10 @@ const Surface = packed struct {
     surrounding_air: SurroundingAir,
     direction_hints: DirectionHints,
 };
-const CombinedIndices = UnsignedInt(dimensions * log_side_len);
-const Direction = UnsignedInt(log2_int_ceil(usize, dimensions));
-const SurroundingAir = UnsignedInt(log2_int_ceil(usize, dimensions * 2));
-const DirectionHints = UnsignedInt((dimensions - 1) * 2);
+const CombinedIndices = UnsignedInt(directions * log_side_len);
+const Direction = UnsignedInt(log2_int_ceil(usize, directions));
+const SurroundingAir = UnsignedInt(log2_int_ceil(usize, directions * 2));
+const DirectionHints = UnsignedInt((directions - 1) * 2);
 
 const LogUsize = std.math.Log2Int(usize);
 
@@ -44,18 +44,18 @@ const range_rotate_factor = 1 << 0x12;
 const rotate_unit: i32 = @intFromFloat(tau * rotate_factor);
 const range_rotate_unit: i32 = @intFromFloat(tau * range_rotate_factor);
 
-const dimensions = 3;
+const directions = 3;
 
 const log_side_len = 0x5;
 const side_len = 1 << log_side_len;
 
-const log_volume_len = log_side_len * dimensions;
+const log_volume_len = log_side_len * directions;
 const volume_len = 1 << log_volume_len;
 
 const morton_mask: CombinedIndices = _: {
     var value: usize = 0;
     for (0..log_side_len) |_| {
-        value <<= dimensions;
+        value <<= directions;
         value |= 1;
     }
     break :_ value;
@@ -68,28 +68,24 @@ const Voxel = enum {
 
 const Uniform = extern struct {
     light: extern struct {
-        affine: [dimensions * (dimensions + 1)]f32,
+        affine: [directions][directions + 1]f32,
     },
     camera: extern struct {
-        position: [dimensions]f32,
+        position: [directions]f32,
 
-        z_near: f32,
+        near: f32,
 
-        czx: f32,
-        szx: f32,
-        czy: f32,
-        szy: f32,
+        cos: [directions - 1]f32,
+        sin: [directions - 1]f32,
+        scale: [directions - 1]f32,
 
-        scale: extern struct {
-            x: f32,
-            y: f32,
-        },
+        far: f32,
     },
 };
 const camera = struct {
     const Keyboard = struct {
-        positive: [dimensions]bool,
-        negative: [dimensions]bool,
+        positive: [directions]bool,
+        negative: [directions]bool,
 
         locked_pointer_toggle: bool,
     };
@@ -125,8 +121,8 @@ pub fn main() !void {
     defer keyboard.destroy();
 
     var camera_keyboard: camera.Keyboard = .{
-        .positive = [_]bool{false} ** dimensions,
-        .negative = [_]bool{false} ** dimensions,
+        .positive = [_]bool{false} ** directions,
+        .negative = [_]bool{false} ** directions,
         .locked_pointer_toggle = false,
     };
     keyboard.setListener(
@@ -156,8 +152,7 @@ pub fn main() !void {
         .dzx = 0,
         .dzy = 0,
     };
-    var camera_zx: i32 = 0;
-    var camera_zy: i32 = 0;
+    var camera_angles: [directions - 1]i32 = [_]i32{0} ** (directions - 1);
     const relative_pointer_v1 = try relative_pointer_manager_v1.getRelativePointer(pointer);
     relative_pointer_v1.setListener(
         *camera.RelativePointerV1,
@@ -378,21 +373,6 @@ pub fn main() !void {
     var vkd = vk.DeviceWrapper.load(device, vki.dispatch.vkGetDeviceProcAddr.?);
     defer vkd.destroyDevice(device, null);
 
-    // vkd.dispatch.vkCmdSetDescriptorBufferOffsets2EXT = @ptrCast(vki.dispatch.vkGetDeviceProcAddr.?(
-    //     device,
-    //     "vkCmdSetDescriptorBufferOffsets2",
-    // ));
-    //
-    // vkd.dispatch.vkCmdSetDescriptorBufferOffsetsEXT = @ptrCast(vki.dispatch.vkGetDeviceProcAddr.?(
-    //     device,
-    //     "vkCmdSetDescriptorBufferOffsets",
-    // ));
-    //
-    // print("{x}\n{x}\n", .{
-    //     @intFromPtr(vkd.dispatch.vkCmdSetDescriptorBufferOffsetsEXT),
-    //     @intFromPtr(vkd.dispatch.vkCmdSetDescriptorBufferOffsets2EXT),
-    // });
-    //
     const queue = vkd.getDeviceQueue2(device, &vk.DeviceQueueInfo2{
         .queue_family_index = 0,
         .queue_index = 0,
@@ -505,6 +485,141 @@ pub fn main() !void {
         }),
     );
 
+    const log_shadow_side_len = 0xa;
+    const shadow_side_len = 1 << log_shadow_side_len;
+    const shadow_create_image_info: vk.ImageCreateInfo = .{
+        .array_layers = 1,
+        .extent = .{
+            .width = shadow_side_len,
+            .height = shadow_side_len,
+            .depth = 1,
+        },
+        .flags = .{},
+        .format = .d32_sfloat,
+        .image_type = .@"2d",
+        .initial_layout = .undefined,
+        .mip_levels = 1,
+        .samples = .{
+            .@"1_bit" = true,
+        },
+        .sharing_mode = .exclusive,
+        .queue_family_index_count = 1,
+        .p_queue_family_indices = &[_]u32{0},
+        .tiling = .optimal,
+        .usage = .{
+            .depth_stencil_attachment_bit = true,
+            .sampled_bit = true,
+        },
+    };
+    var shadow_memory_requirements: vk.MemoryRequirements2 = .{
+        .memory_requirements = undefined,
+    };
+    _ = vkd.getDeviceImageMemoryRequirements(
+        device,
+        &vk.DeviceImageMemoryRequirements{
+            .p_create_info = &shadow_create_image_info,
+            .plane_aspect = .{
+                .depth_bit = true,
+            },
+        },
+        &shadow_memory_requirements,
+    );
+    const shadow_memory = try vkd.allocateMemory(
+        device,
+        &vk.MemoryAllocateInfo{
+            .allocation_size = shadow_memory_requirements.memory_requirements.size,
+            .memory_type_index = try findMemoryTypeIndex(
+                shadow_memory_requirements.memory_requirements.memory_type_bits,
+                vk.MemoryPropertyFlags{
+                    .device_local_bit = true,
+                },
+                physical_device_memory_properties,
+            ),
+        },
+        null,
+    );
+    defer vkd.freeMemory(
+        device,
+        shadow_memory,
+        null,
+    );
+    const shadow_image = try vkd.createImage(
+        device,
+        &shadow_create_image_info,
+        null,
+    );
+    defer vkd.destroyImage(
+        device,
+        shadow_image,
+        null,
+    );
+    _ = try vkd.bindImageMemory2(
+        device,
+        1,
+        @ptrCast(&vk.BindImageMemoryInfo{
+            .image = shadow_image,
+            .memory = shadow_memory,
+            .memory_offset = 0,
+        }),
+    );
+    const shadow_image_view = try vkd.createImageView(
+        device,
+        &vk.ImageViewCreateInfo{
+            .format = shadow_create_image_info.format,
+            .image = shadow_image,
+            .flags = .{},
+            .view_type = .@"2d",
+            .subresource_range = .{
+                .aspect_mask = .{
+                    .depth_bit = true,
+                },
+                .base_array_layer = 0,
+                .base_mip_level = 0,
+                .layer_count = vk.REMAINING_ARRAY_LAYERS,
+                .level_count = vk.REMAINING_MIP_LEVELS,
+            },
+            .components = .{
+                .a = .identity,
+                .b = .identity,
+                .g = .identity,
+                .r = .identity,
+            },
+        },
+        null,
+    );
+    defer vkd.destroyImageView(
+        device,
+        shadow_image_view,
+        null,
+    );
+    const shadow_sampler = try vkd.createSampler(
+        device,
+        &vk.SamplerCreateInfo{
+            .address_mode_u = .clamp_to_border,
+            .address_mode_v = .clamp_to_border,
+            .address_mode_w = undefined,
+            .anisotropy_enable = vk.FALSE,
+            .border_color = .float_opaque_black,
+            .compare_enable = vk.TRUE,
+            .compare_op = .less,
+            .flags = .{},
+            .mag_filter = .linear,
+            .min_filter = .linear,
+            .max_anisotropy = 0,
+            .max_lod = 0,
+            .min_lod = 0,
+            .mip_lod_bias = 0,
+            .mipmap_mode = .nearest,
+            .unnormalized_coordinates = vk.FALSE,
+        },
+        null,
+    );
+    defer vkd.destroySampler(
+        device,
+        shadow_sampler,
+        null,
+    );
+
     const uniform: *Uniform = @ptrCast(@alignCast(try vkd.mapMemory2(device, &vk.MemoryMapInfo{
         .flags = .{},
         .memory = camera_memory,
@@ -512,30 +627,75 @@ pub fn main() !void {
         .size = @sizeOf(Uniform),
     })));
 
-    const descriptor_set_layout_bindings = [_]vk.DescriptorSetLayoutBinding{
+    const color_descriptor_set_layout_bindings = [_]vk.DescriptorSetLayoutBinding{
         vk.DescriptorSetLayoutBinding{
             .binding = 0,
             .descriptor_count = 1,
             .descriptor_type = .uniform_buffer,
-            .stage_flags = .{ .vertex_bit = true },
+            .stage_flags = .{
+                .vertex_bit = true,
+            },
+        },
+        vk.DescriptorSetLayoutBinding{
+            .binding = 1,
+            .descriptor_count = 1,
+            .descriptor_type = .combined_image_sampler,
+            .stage_flags = .{
+                .fragment_bit = true,
+            },
+        },
+    };
+    const shadow_descriptor_set_layout_bindings = [_]vk.DescriptorSetLayoutBinding{
+        vk.DescriptorSetLayoutBinding{
+            .binding = 0,
+            .descriptor_count = 1,
+            .descriptor_type = .uniform_buffer,
+            .stage_flags = .{
+                .vertex_bit = true,
+            },
         },
     };
 
-    const descriptor_set_layout = try vkd.createDescriptorSetLayout(
+    const color_descriptor_set_layout = try vkd.createDescriptorSetLayout(
         device,
         &vk.DescriptorSetLayoutCreateInfo{
             .flags = .{
                 .descriptor_buffer_bit_ext = true,
             },
-            .binding_count = descriptor_set_layout_bindings.len,
-            .p_bindings = &descriptor_set_layout_bindings,
+            .binding_count = color_descriptor_set_layout_bindings.len,
+            .p_bindings = &color_descriptor_set_layout_bindings,
         },
         null,
     );
     defer vkd.destroyDescriptorSetLayout(
         device,
-        descriptor_set_layout,
+        color_descriptor_set_layout,
         null,
+    );
+    const color_descriptor_set_layout_size = vkd.getDescriptorSetLayoutSizeEXT(
+        device,
+        color_descriptor_set_layout,
+    );
+
+    const shadow_descriptor_set_layout = try vkd.createDescriptorSetLayout(
+        device,
+        &vk.DescriptorSetLayoutCreateInfo{
+            .flags = .{
+                .descriptor_buffer_bit_ext = true,
+            },
+            .binding_count = shadow_descriptor_set_layout_bindings.len,
+            .p_bindings = &shadow_descriptor_set_layout_bindings,
+        },
+        null,
+    );
+    defer vkd.destroyDescriptorSetLayout(
+        device,
+        shadow_descriptor_set_layout,
+        null,
+    );
+    const shadow_descriptor_set_layout_size = vkd.getDescriptorSetLayoutSizeEXT(
+        device,
+        shadow_descriptor_set_layout,
     );
 
     var descriptor_memory_requirements: vk.MemoryRequirements2 = .{
@@ -549,11 +709,9 @@ pub fn main() !void {
         .sharing_mode = .exclusive,
         .queue_family_index_count = 1,
         .p_queue_family_indices = &[_]u32{0},
-        .size = vkd.getDescriptorSetLayoutSizeEXT(
-            device,
-            descriptor_set_layout,
-        ),
+        .size = color_descriptor_set_layout_size + shadow_descriptor_set_layout_size,
     };
+
     vkd.getDeviceBufferMemoryRequirements(
         device,
         &vk.DeviceBufferMemoryRequirements{
@@ -570,6 +728,7 @@ pub fn main() !void {
                 descriptor_memory_requirements.memory_requirements.memory_type_bits,
                 vk.MemoryPropertyFlags{
                     .host_visible_bit = true,
+                    .host_coherent_bit = true,
                     // TODO:
                 },
                 physical_device_memory_properties,
@@ -592,7 +751,7 @@ pub fn main() !void {
     );
     defer vkd.destroyBuffer(device, descriptor_buffer, null);
 
-    const descriptor_buffer_mapped = (try vkd.mapMemory2(
+    const descriptor_buffer_mapped: [*]u8 = @ptrCast((try vkd.mapMemory2(
         device,
         &vk.MemoryMapInfo{
             .flags = .{},
@@ -600,7 +759,7 @@ pub fn main() !void {
             .offset = 0,
             .size = descriptor_buffer_create_info.size,
         },
-    )).?;
+    )).?);
 
     _ = try vkd.bindBufferMemory2(
         device,
@@ -639,19 +798,56 @@ pub fn main() !void {
         physical_device_descriptor_buffer_properties.uniform_buffer_descriptor_size,
         @ptrCast(descriptor_buffer_mapped),
     );
+    vkd.getDescriptorEXT(
+        device,
+        &vk.DescriptorGetInfoEXT{
+            .type = .uniform_buffer,
+            .data = .{
+                .p_uniform_buffer = &vk.DescriptorAddressInfoEXT{
+                    .format = .undefined,
+                    .range = @sizeOf(Uniform),
+                    .address = vkd.getBufferDeviceAddress(
+                        device,
+                        &vk.BufferDeviceAddressInfo{
+                            .buffer = camera_buffer,
+                        },
+                    ),
+                },
+            },
+        },
+        physical_device_descriptor_buffer_properties.uniform_buffer_descriptor_size,
+        @ptrCast(descriptor_buffer_mapped + shadow_descriptor_set_layout_size),
+    );
+    vkd.getDescriptorEXT(
+        device,
+        &vk.DescriptorGetInfoEXT{
+            .type = .combined_image_sampler,
+            .data = .{
+                .p_combined_image_sampler = &vk.DescriptorImageInfo{
+                    .image_layout = .depth_read_only_optimal,
+                    .image_view = shadow_image_view,
+                    .sampler = shadow_sampler,
+                },
+            },
+        },
+        physical_device_descriptor_buffer_properties.combined_image_sampler_descriptor_size,
+        @ptrCast(descriptor_buffer_mapped + shadow_descriptor_set_layout_size +
+            physical_device_descriptor_buffer_properties.uniform_buffer_descriptor_size),
+    );
+
     const allocator = std.heap.page_allocator;
     var voxels = try allocator.alloc(Voxel, volume_len);
     defer allocator.free(voxels);
 
     for (0..volume_len) |voxel_i| {
         var sum: usize = 0;
-        for (0..dimensions) |_dimension_i| {
-            const dimension_i: Direction = @truncate(_dimension_i);
-            const coord = pext(usize, voxel_i, morton_mask << dimension_i);
+        for (0..directions) |_direction_i| {
+            const direction_i: Direction = @truncate(_direction_i);
+            const coord = pext(usize, voxel_i, morton_mask << direction_i);
             sum += coord * coord;
         }
         const max_sum = 1 << (2 * log_side_len);
-        voxels[voxel_i] = if (sum > max_sum or sum < max_sum / 3) Voxel.Stone else Voxel.Air;
+        voxels[voxel_i] = if (sum > max_sum) Voxel.Stone else Voxel.Air;
     }
 
     // const PartialVoxelId = UnsignedInt(log_side_len);
@@ -790,22 +986,37 @@ pub fn main() !void {
         }),
     );
 
+    const shadow_pipeline_layout = try vkd.createPipelineLayout(
+        device,
+        &vk.PipelineLayoutCreateInfo{
+            .set_layout_count = 1,
+            .p_set_layouts = @ptrCast(&shadow_descriptor_set_layout),
+        },
+        null,
+    );
+    defer vkd.destroyPipelineLayout(
+        device,
+        shadow_pipeline_layout,
+        null,
+    );
     const color_pipeline_layout = try vkd.createPipelineLayout(
         device,
         &vk.PipelineLayoutCreateInfo{
             .set_layout_count = 1,
-            .p_set_layouts = &[_]vk.DescriptorSetLayout{
-                descriptor_set_layout,
-            },
+            .p_set_layouts = @ptrCast(&color_descriptor_set_layout),
         },
         null,
     );
-    defer vkd.destroyPipelineLayout(device, color_pipeline_layout, null);
+    defer vkd.destroyPipelineLayout(
+        device,
+        color_pipeline_layout,
+        null,
+    );
 
-    var color_pipeline: vk.Pipeline = undefined;
+    var pipelines: [2]vk.Pipeline = undefined;
     const shaders_spv align(@alignOf(u32)) = @embedFile("shaders").*;
 
-    const vertex_shader = try vkd.createShaderModule(
+    const shader = try vkd.createShaderModule(
         device,
         &vk.ShaderModuleCreateInfo{
             .p_code = @ptrCast(&shaders_spv),
@@ -813,142 +1024,258 @@ pub fn main() !void {
         },
         null,
     );
-    defer vkd.destroyShaderModule(device, vertex_shader, null);
-
-    const fragment_shader = try vkd.createShaderModule(
-        device,
-        &vk.ShaderModuleCreateInfo{
-            .p_code = @ptrCast(&shaders_spv),
-            .code_size = shaders_spv.len,
-        },
-        null,
-    );
-    defer vkd.destroyShaderModule(device, fragment_shader, null);
+    defer vkd.destroyShaderModule(device, shader, null);
 
     _ = try vkd.createGraphicsPipelines(
         device,
         .null_handle,
-        1,
-        @ptrCast(&vk.GraphicsPipelineCreateInfo{
-            .flags = .{
-                .descriptor_buffer_bit_ext = true,
-            },
-            .base_pipeline_handle = .null_handle,
-            .base_pipeline_index = undefined,
-            .layout = color_pipeline_layout,
-            .p_input_assembly_state = &vk.PipelineInputAssemblyStateCreateInfo{
-                .topology = .triangle_strip,
-                .primitive_restart_enable = vk.FALSE,
-            },
-            .p_color_blend_state = &vk.PipelineColorBlendStateCreateInfo{
-                .attachment_count = 1,
-                .blend_constants = [_]f32{
-                    0.0,
-                    0.0,
-                    0.0,
-                    0.0,
+        2,
+        &[_]vk.GraphicsPipelineCreateInfo{
+            vk.GraphicsPipelineCreateInfo{
+                .flags = .{
+                    .descriptor_buffer_bit_ext = true,
                 },
-                .logic_op = .copy,
-                .logic_op_enable = vk.FALSE,
-                .p_attachments = @ptrCast(&vk.PipelineColorBlendAttachmentState{
-                    .blend_enable = vk.FALSE,
-                    .src_color_blend_factor = .one,
-                    .dst_color_blend_factor = .zero,
-                    .color_blend_op = .add,
-                    .src_alpha_blend_factor = .one,
-                    .dst_alpha_blend_factor = .zero,
-                    .alpha_blend_op = .add,
-                    .color_write_mask = .{
-                        .r_bit = true,
-                        .b_bit = true,
-                        .g_bit = true,
-                        .a_bit = true,
+                .base_pipeline_handle = .null_handle,
+                .base_pipeline_index = undefined,
+                .layout = color_pipeline_layout,
+                .p_input_assembly_state = &vk.PipelineInputAssemblyStateCreateInfo{
+                    .topology = .triangle_strip,
+                    .primitive_restart_enable = vk.FALSE,
+                },
+                .p_color_blend_state = &vk.PipelineColorBlendStateCreateInfo{
+                    .attachment_count = 1,
+                    .blend_constants = [_]f32{
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.0,
                     },
-                }),
-            },
-            .p_depth_stencil_state = &vk.PipelineDepthStencilStateCreateInfo{
-                .depth_bounds_test_enable = vk.TRUE,
-                .flags = .{},
-                .depth_compare_op = .greater,
-                .depth_test_enable = vk.TRUE,
-                .depth_write_enable = vk.TRUE,
-                .stencil_test_enable = vk.FALSE,
-                .back = undefined,
-                .front = undefined,
-                .min_depth_bounds = 0.0,
-                .max_depth_bounds = 1.0,
-            },
-            .p_vertex_input_state = &vk.PipelineVertexInputStateCreateInfo{
-                .vertex_attribute_description_count = 1,
-                .vertex_binding_description_count = 1,
-                .p_vertex_attribute_descriptions = @ptrCast(&vk.VertexInputAttributeDescription{
-                    .binding = 0,
-                    .format = .r32_uint,
-                    .location = 0,
-                    .offset = 0,
-                }),
-                .p_vertex_binding_descriptions = @ptrCast(&vk.VertexInputBindingDescription{
-                    .binding = 0,
-                    .stride = @sizeOf(Surface),
-                    .input_rate = .instance,
-                }),
-            },
-            .p_rasterization_state = &vk.PipelineRasterizationStateCreateInfo{
-                .cull_mode = .{ .back_bit = true },
-                .front_face = .counter_clockwise,
-                .polygon_mode = .fill,
-                .depth_bias_enable = vk.FALSE,
-                .depth_clamp_enable = vk.FALSE,
-                .depth_bias_clamp = 0.0,
-                .depth_bias_constant_factor = 0.0,
-                .depth_bias_slope_factor = 0.0,
-                .line_width = 1.0,
-                .rasterizer_discard_enable = vk.FALSE,
-            },
-            .p_multisample_state = &vk.PipelineMultisampleStateCreateInfo{
-                .rasterization_samples = .{ .@"1_bit" = true },
-                .sample_shading_enable = vk.FALSE,
-                .min_sample_shading = 1,
-                .alpha_to_coverage_enable = vk.FALSE,
-                .alpha_to_one_enable = vk.FALSE,
-            },
-            .p_viewport_state = &vk.PipelineViewportStateCreateInfo{
-                .scissor_count = 1,
-                .p_scissors = null,
-                .viewport_count = 1,
-                .p_viewports = null,
-            },
-            .p_dynamic_state = &vk.PipelineDynamicStateCreateInfo{
-                .dynamic_state_count = 2,
-                .p_dynamic_states = @ptrCast(&[_]vk.DynamicState{ .viewport, .scissor }),
-            },
-            .stage_count = 2,
-            .p_stages = &[_]vk.PipelineShaderStageCreateInfo{
-                vk.PipelineShaderStageCreateInfo{
-                    .p_name = "vertexColor",
-                    .stage = .{ .vertex_bit = true },
-                    .module = vertex_shader,
+                    .logic_op = .copy,
+                    .logic_op_enable = vk.FALSE,
+                    .p_attachments = @ptrCast(&vk.PipelineColorBlendAttachmentState{
+                        .blend_enable = vk.FALSE,
+                        .src_color_blend_factor = .one,
+                        .dst_color_blend_factor = .zero,
+                        .color_blend_op = .add,
+                        .src_alpha_blend_factor = .one,
+                        .dst_alpha_blend_factor = .zero,
+                        .alpha_blend_op = .add,
+                        .color_write_mask = .{
+                            .r_bit = true,
+                            .b_bit = true,
+                            .g_bit = true,
+                            .a_bit = true,
+                        },
+                    }),
                 },
-                vk.PipelineShaderStageCreateInfo{
-                    .p_name = "fragmentColor",
-                    .stage = .{ .fragment_bit = true },
-                    .module = fragment_shader,
+                .p_depth_stencil_state = &vk.PipelineDepthStencilStateCreateInfo{
+                    .depth_bounds_test_enable = vk.TRUE,
+                    .flags = .{},
+                    .depth_compare_op = .less,
+                    .depth_test_enable = vk.TRUE,
+                    .depth_write_enable = vk.TRUE,
+                    .stencil_test_enable = vk.FALSE,
+                    .back = undefined,
+                    .front = undefined,
+                    .min_depth_bounds = 0.0,
+                    .max_depth_bounds = 1.0,
+                },
+                .p_vertex_input_state = &vk.PipelineVertexInputStateCreateInfo{
+                    .vertex_attribute_description_count = 1,
+                    .vertex_binding_description_count = 1,
+                    .p_vertex_attribute_descriptions = @ptrCast(&vk.VertexInputAttributeDescription{
+                        .binding = 0,
+                        .format = .r32_uint,
+                        .location = 0,
+                        .offset = 0,
+                    }),
+                    .p_vertex_binding_descriptions = @ptrCast(&vk.VertexInputBindingDescription{
+                        .binding = 0,
+                        .stride = @sizeOf(Surface),
+                        .input_rate = .instance,
+                    }),
+                },
+                .p_rasterization_state = &vk.PipelineRasterizationStateCreateInfo{
+                    .cull_mode = .{ .back_bit = true },
+                    .front_face = .counter_clockwise,
+                    .polygon_mode = .fill,
+                    .depth_bias_enable = vk.FALSE,
+                    .depth_clamp_enable = vk.FALSE,
+                    .depth_bias_clamp = 0.0,
+                    .depth_bias_constant_factor = 0.0,
+                    .depth_bias_slope_factor = 0.0,
+                    .line_width = 1.0,
+                    .rasterizer_discard_enable = vk.FALSE,
+                },
+                .p_multisample_state = &vk.PipelineMultisampleStateCreateInfo{
+                    .rasterization_samples = .{ .@"1_bit" = true },
+                    .sample_shading_enable = vk.FALSE,
+                    .min_sample_shading = 1,
+                    .alpha_to_coverage_enable = vk.FALSE,
+                    .alpha_to_one_enable = vk.FALSE,
+                },
+                .p_viewport_state = &vk.PipelineViewportStateCreateInfo{
+                    .scissor_count = 1,
+                    .p_scissors = null,
+                    .viewport_count = 1,
+                    .p_viewports = null,
+                },
+                .p_dynamic_state = &vk.PipelineDynamicStateCreateInfo{
+                    .dynamic_state_count = 2,
+                    .p_dynamic_states = @ptrCast(&[_]vk.DynamicState{ .viewport, .scissor }),
+                },
+                .stage_count = 1,
+                .p_stages = &[_]vk.PipelineShaderStageCreateInfo{
+                    vk.PipelineShaderStageCreateInfo{
+                        .p_name = "vertexShadow",
+                        .stage = .{
+                            .vertex_bit = true,
+                        },
+                        .module = shader,
+                    },
+                },
+                .render_pass = .null_handle,
+                .subpass = undefined,
+                .p_next = &vk.PipelineRenderingCreateInfo{
+                    .depth_attachment_format = .d32_sfloat,
+                    .stencil_attachment_format = .undefined,
+                    .view_mask = 0,
                 },
             },
-            .render_pass = .null_handle,
-            .subpass = undefined,
-            .p_next = &vk.PipelineRenderingCreateInfo{
-                .color_attachment_count = 1,
-                .p_color_attachment_formats = @ptrCast(&surface_format.format),
-                .depth_attachment_format = .d32_sfloat,
-                .stencil_attachment_format = .undefined,
-                .view_mask = 0,
+            vk.GraphicsPipelineCreateInfo{
+                .flags = .{
+                    .descriptor_buffer_bit_ext = true,
+                },
+                .base_pipeline_handle = .null_handle,
+                .base_pipeline_index = undefined,
+                .layout = color_pipeline_layout,
+                .p_input_assembly_state = &vk.PipelineInputAssemblyStateCreateInfo{
+                    .topology = .triangle_strip,
+                    .primitive_restart_enable = vk.FALSE,
+                },
+                .p_color_blend_state = &vk.PipelineColorBlendStateCreateInfo{
+                    .attachment_count = 1,
+                    .blend_constants = [_]f32{
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                    },
+                    .logic_op = .copy,
+                    .logic_op_enable = vk.FALSE,
+                    .p_attachments = @ptrCast(&vk.PipelineColorBlendAttachmentState{
+                        .blend_enable = vk.FALSE,
+                        .src_color_blend_factor = .one,
+                        .dst_color_blend_factor = .zero,
+                        .color_blend_op = .add,
+                        .src_alpha_blend_factor = .one,
+                        .dst_alpha_blend_factor = .zero,
+                        .alpha_blend_op = .add,
+                        .color_write_mask = .{
+                            .r_bit = true,
+                            .b_bit = true,
+                            .g_bit = true,
+                            .a_bit = true,
+                        },
+                    }),
+                },
+                .p_depth_stencil_state = &vk.PipelineDepthStencilStateCreateInfo{
+                    .depth_bounds_test_enable = vk.TRUE,
+                    .flags = .{},
+                    .depth_compare_op = .greater,
+                    .depth_test_enable = vk.TRUE,
+                    .depth_write_enable = vk.TRUE,
+                    .stencil_test_enable = vk.FALSE,
+                    .back = undefined,
+                    .front = undefined,
+                    .min_depth_bounds = 0.0,
+                    .max_depth_bounds = 1.0,
+                },
+                .p_vertex_input_state = &vk.PipelineVertexInputStateCreateInfo{
+                    .vertex_attribute_description_count = 1,
+                    .vertex_binding_description_count = 1,
+                    .p_vertex_attribute_descriptions = @ptrCast(&vk.VertexInputAttributeDescription{
+                        .binding = 0,
+                        .format = .r32_uint,
+                        .location = 0,
+                        .offset = 0,
+                    }),
+                    .p_vertex_binding_descriptions = @ptrCast(&vk.VertexInputBindingDescription{
+                        .binding = 0,
+                        .stride = @sizeOf(Surface),
+                        .input_rate = .instance,
+                    }),
+                },
+                .p_rasterization_state = &vk.PipelineRasterizationStateCreateInfo{
+                    .cull_mode = .{ .back_bit = true },
+                    .front_face = .counter_clockwise,
+                    .polygon_mode = .fill,
+                    .depth_bias_enable = vk.FALSE,
+                    .depth_clamp_enable = vk.FALSE,
+                    .depth_bias_clamp = 0.0,
+                    .depth_bias_constant_factor = 0.0,
+                    .depth_bias_slope_factor = 0.0,
+                    .line_width = 1.0,
+                    .rasterizer_discard_enable = vk.FALSE,
+                },
+                .p_multisample_state = &vk.PipelineMultisampleStateCreateInfo{
+                    .rasterization_samples = .{ .@"1_bit" = true },
+                    .sample_shading_enable = vk.FALSE,
+                    .min_sample_shading = 1,
+                    .alpha_to_coverage_enable = vk.FALSE,
+                    .alpha_to_one_enable = vk.FALSE,
+                },
+                .p_viewport_state = &vk.PipelineViewportStateCreateInfo{
+                    .scissor_count = 1,
+                    .p_scissors = null,
+                    .viewport_count = 1,
+                    .p_viewports = null,
+                },
+                .p_dynamic_state = &vk.PipelineDynamicStateCreateInfo{
+                    .dynamic_state_count = 2,
+                    .p_dynamic_states = @ptrCast(&[_]vk.DynamicState{ .viewport, .scissor }),
+                },
+                .stage_count = 2,
+                .p_stages = &[_]vk.PipelineShaderStageCreateInfo{
+                    vk.PipelineShaderStageCreateInfo{
+                        .p_name = "vertexColor",
+                        .stage = .{
+                            .vertex_bit = true,
+                        },
+                        .module = shader,
+                    },
+                    vk.PipelineShaderStageCreateInfo{
+                        .p_name = "fragmentColor",
+                        .stage = .{
+                            .fragment_bit = true,
+                        },
+                        .module = shader,
+                    },
+                },
+                .render_pass = .null_handle,
+                .subpass = undefined,
+                .p_next = &vk.PipelineRenderingCreateInfo{
+                    .color_attachment_count = 1,
+                    .p_color_attachment_formats = @ptrCast(&surface_format.format),
+                    .depth_attachment_format = .d32_sfloat,
+                    .stencil_attachment_format = .undefined,
+                    .view_mask = 0,
+                },
             },
-        }),
+        },
         null,
-        @ptrCast(&color_pipeline),
+        &pipelines,
     );
-    defer vkd.destroyPipeline(device, color_pipeline, null);
+    const color_pipeline = pipelines[1];
+    const shadow_pipeline = pipelines[0];
+
+    defer for (pipelines) |pipeline| {
+        vkd.destroyPipeline(
+            device,
+            pipeline,
+            null,
+        );
+    };
 
     defer vkd.destroySwapchainKHR(device, swapchain, null);
     defer for (0..swapchain_images_count) |i| {
@@ -1011,12 +1338,21 @@ pub fn main() !void {
 
     var camera_speed: f32 = 4.0;
 
-    const side: f32 = (side_len / @sqrt(@as(f32, @floatFromInt(dimensions)))) - 2.0;
+    var rand = std.Random.DefaultPrng.init(@bitCast(std.time.microTimestamp()));
+    const random = rand.random();
+    var light_direction: [directions]f32 = undefined;
+    for (0..directions) |direction| {
+        light_direction[direction] = random.float(f32);
+    }
+    normalize(directions, &light_direction);
+
+    const side: f32 = (side_len / @sqrt(@as(f32, @floatFromInt(directions)))) - 2.0;
     uniform.camera.position[0] = side;
     uniform.camera.position[1] = side;
     uniform.camera.position[2] = side;
 
     var surfaces_regenerate = true;
+    var init_shadow = true;
     while (true) {
         if (display.roundtrip() != .SUCCESS) return error.RoundtripFailed;
 
@@ -1041,11 +1377,11 @@ pub fn main() !void {
             }
 
             if (locked_pointer != null) {
-                camera_zx += camera_relative_pointer_v1.dzx;
+                camera_angles[0] += camera_relative_pointer_v1.dzx;
 
-                camera_zy += camera_relative_pointer_v1.dzy;
-                camera_zy = clamp(
-                    camera_zy,
+                camera_angles[1] += camera_relative_pointer_v1.dzy;
+                camera_angles[1] = clamp(
+                    camera_angles[1],
                     -(rotate_unit / 4) * 0xf / 0x10,
                     (rotate_unit / 4) * 0xf / 0x10,
                 );
@@ -1063,11 +1399,11 @@ pub fn main() !void {
                 camera_pointer.dzx_half_range = 0;
             }
 
-            var zx: f32 = @floatFromInt(camera_zx);
-            zx /= rotate_factor;
-
-            var zy: f32 = @floatFromInt(camera_zy);
-            zy /= rotate_factor;
+            var angles: [directions - 1]f32 = undefined;
+            for (0..directions - 1) |direction| {
+                angles[direction] = @floatFromInt(camera_angles[direction]);
+                angles[direction] /= rotate_factor;
+            }
 
             var zx_half_range: f32 = @floatFromInt(camera_zx_half_range);
             zx_half_range /= range_rotate_factor;
@@ -1084,10 +1420,10 @@ pub fn main() !void {
 
                 const ds = camera_speed * dt;
 
-                var d: [dimensions]f32 = [_]f32{
-                    @sin(zx) * @cos(zy),
+                var d: [directions]f32 = [_]f32{
+                    @sin(angles[0]) * @cos(angles[1]),
                     1.0,
-                    @cos(zx) * @cos(zy),
+                    @cos(angles[0]) * @cos(angles[1]),
                 };
                 for (&d) |*v| {
                     v.* *= ds;
@@ -1118,25 +1454,33 @@ pub fn main() !void {
 
             if (camera_pointer.create != camera_pointer.destroy) {
                 const origin = uniform.camera.position;
-                var indices: [dimensions]usize = undefined;
+                var indices: [directions]usize = undefined;
                 var combined_indices: usize = 0;
 
-                const direction: [dimensions]f32 = [_]f32{
-                    @sin(zx) * @cos(zy),
-                    @sin(zy),
-                    @cos(zx) * @cos(zy),
+                // const direction: [directions]f32 = [_]f32{1.0} ** directions;
+                // for (0 .. directions
+
+                var ray: [directions]f32 = [_]f32{
+                    0.0,
+                    0.0,
+                    1.0,
                 };
+                ray[1] = ray[2] * @sin(angles[1]);
+                ray[2] *= @cos(angles[1]);
 
-                var planes: [dimensions]f32 = undefined;
-                for (0..dimensions) |dimension_i| {
-                    planes[dimension_i] =
-                        if (direction[dimension_i] > 0.0)
-                            @ceil(origin[dimension_i])
+                ray[0] = ray[2] * @sin(angles[0]);
+                ray[2] *= @cos(angles[0]);
+
+                var planes: [directions]f32 = undefined;
+                for (0..directions) |direction_i| {
+                    planes[direction_i] =
+                        if (ray[direction_i] > 0.0)
+                            @ceil(origin[direction_i])
                         else
-                            @floor(origin[dimension_i]);
+                            @floor(origin[direction_i]);
 
-                    indices[dimension_i] = @intFromFloat(origin[dimension_i]);
-                    combined_indices |= pdep(usize, indices[dimension_i], morton_mask << @truncate(dimension_i));
+                    indices[direction_i] = @intFromFloat(origin[direction_i]);
+                    combined_indices |= pdep(usize, indices[direction_i], morton_mask << @truncate(direction_i));
                 }
 
                 var old_combined_indices: ?usize = null;
@@ -1151,28 +1495,28 @@ pub fn main() !void {
                         break;
                     }
                     var t_min: f32 = std.math.inf(f32);
-                    var dimension_i_min: usize = undefined;
-                    for (0..dimensions) |dimension_i| {
-                        const t = (planes[dimension_i] - origin[dimension_i]) / direction[dimension_i];
+                    var direction_i_min: usize = undefined;
+                    for (0..directions) |direction_i| {
+                        const t = (planes[direction_i] - origin[direction_i]) / ray[direction_i];
                         if (t < t_min) {
                             t_min = t;
-                            dimension_i_min = dimension_i;
+                            direction_i_min = direction_i;
                         }
                     }
-                    if (direction[dimension_i_min] > 0.0) {
-                        if (indices[dimension_i_min] == side_len - 1) break;
-                        planes[dimension_i_min] += 1.0;
-                        indices[dimension_i_min] += 1;
+                    if (ray[direction_i_min] > 0.0) {
+                        if (indices[direction_i_min] == side_len - 1) break;
+                        planes[direction_i_min] += 1.0;
+                        indices[direction_i_min] += 1;
                     } else {
-                        if (indices[dimension_i_min] == 0) break;
-                        planes[dimension_i_min] -= 1.0;
-                        indices[dimension_i_min] -= 1;
+                        if (indices[direction_i_min] == 0) break;
+                        planes[direction_i_min] -= 1.0;
+                        indices[direction_i_min] -= 1;
                     }
-                    const mask = morton_mask << @truncate(dimension_i_min);
+                    const mask = morton_mask << @truncate(direction_i_min);
 
                     old_combined_indices = combined_indices;
                     combined_indices &= ~mask;
-                    combined_indices |= pdep(usize, indices[dimension_i_min], mask);
+                    combined_indices |= pdep(usize, indices[direction_i_min], mask);
                 }
             }
 
@@ -1184,21 +1528,33 @@ pub fn main() !void {
                 generateSurfaces(voxels.ptr, surface_transfer_memory_mapped);
             }
 
-            const camera_size_x: f32 = 0.2;
-            uniform.camera.z_near = camera_size_x / @tan(zx_half_range);
-            uniform.camera.scale.x = uniform.camera.z_near / camera_size_x;
-            uniform.camera.scale.y = uniform.camera.scale.x *
+            var camera_scale: [directions - 1]f32 = undefined;
+            camera_scale[0] = 0.2;
+            uniform.camera.near = camera_scale[0] / @tan(zx_half_range);
+            uniform.camera.scale[0] = uniform.camera.near / camera_scale[0];
+            uniform.camera.scale[1] = uniform.camera.scale[0] *
                 @as(f32, @floatFromInt(swapchain_extent.width)) /
                 @as(f32, @floatFromInt(swapchain_extent.height));
 
-            uniform.camera.czx = @cos(zx);
-            uniform.camera.szx = @sin(zx);
+            for (0..directions - 1) |direction| {
+                uniform.camera.cos[direction] = @cos(angles[direction]);
+                uniform.camera.sin[direction] = @sin(angles[direction]);
+            }
 
-            uniform.camera.czy = @cos(zy);
-            uniform.camera.szy = @sin(zy);
+            camera_scale[1] = camera_scale[0] * @as(f32, @floatFromInt(swapchain_extent.height)) /
+                @as(f32, @floatFromInt(swapchain_extent.width));
+
+            uniform.light.affine = computeLightAffine(
+                uniform.camera.position,
+                light_direction,
+                angles,
+                uniform.camera.near,
+                uniform.camera.near + 5.0,
+                camera_scale,
+            );
         }
 
-        var image_memory_barriers: [2]vk.ImageMemoryBarrier2 = undefined;
+        var image_memory_barriers: [3]vk.ImageMemoryBarrier2 = undefined;
         var image_memory_barriers_len: u8 = 0;
         var init_swapchain: bool = false;
 
@@ -1411,6 +1767,65 @@ pub fn main() !void {
             toplevel_event = null;
         }
 
+        image_memory_barriers[image_memory_barriers_len] = if (init_shadow)
+            vk.ImageMemoryBarrier2{
+                .src_queue_family_index = 0,
+                .dst_queue_family_index = 0,
+                .src_stage_mask = .{},
+                .src_access_mask = .{},
+                .dst_stage_mask = .{
+                    .early_fragment_tests_bit = true,
+                    .late_fragment_tests_bit = true,
+                },
+                .dst_access_mask = .{
+                    .depth_stencil_attachment_write_bit = true,
+                },
+                .image = shadow_image,
+                .old_layout = .undefined,
+                .new_layout = .depth_attachment_optimal,
+                .subresource_range = .{
+                    .aspect_mask = .{
+                        .depth_bit = true,
+                    },
+                    .base_array_layer = 0,
+                    .base_mip_level = 0,
+                    .layer_count = 1,
+                    .level_count = 1,
+                },
+            }
+        else
+            vk.ImageMemoryBarrier2{
+                .src_queue_family_index = 0,
+                .dst_queue_family_index = 0,
+                .src_stage_mask = .{
+                    .fragment_shader_bit = true,
+                },
+                .src_access_mask = .{
+                    .shader_read_bit = true,
+                },
+                .dst_stage_mask = .{
+                    .early_fragment_tests_bit = true,
+                    .late_fragment_tests_bit = true,
+                },
+                .dst_access_mask = .{
+                    .depth_stencil_attachment_write_bit = true,
+                },
+                .image = shadow_image,
+                .old_layout = .depth_read_only_optimal,
+                .new_layout = .depth_attachment_optimal,
+                .subresource_range = .{
+                    .aspect_mask = .{
+                        .depth_bit = true,
+                    },
+                    .base_array_layer = 0,
+                    .base_mip_level = 0,
+                    .layer_count = 1,
+                    .level_count = 1,
+                },
+            };
+        image_memory_barriers_len += 1;
+        init_shadow = false;
+
         image_memory_barriers[image_memory_barriers_len] = if (init_swapchain)
             vk.ImageMemoryBarrier2{
                 .src_queue_family_index = 0,
@@ -1539,34 +1954,158 @@ pub fn main() !void {
                 surfaces_regenerate = false;
             }
 
+            vkd.cmdPipelineBarrier2(command_buffers[frame], &vk.DependencyInfo{
+                .image_memory_barrier_count = image_memory_barriers_len,
+                .p_image_memory_barriers = &image_memory_barriers,
+                .buffer_memory_barrier_count = 1,
+                .p_buffer_memory_barriers = @ptrCast(&vk.BufferMemoryBarrier2{
+                    .buffer = surface_buffer,
+                    .offset = 0,
+                    .size = surface_buffer_create_info.size,
+                    .src_stage_mask = .{
+                        .copy_bit = true,
+                    },
+                    .dst_stage_mask = .{
+                        .copy_bit = true,
+                    },
+                    .src_access_mask = .{
+                        .transfer_write_bit = true,
+                    },
+                    .dst_access_mask = .{
+                        .transfer_write_bit = true,
+                    },
+                    .src_queue_family_index = 0,
+                    .dst_queue_family_index = 0,
+                }),
+            });
+            // shadow cast pass
+            {
+                vkd.cmdBeginRendering(command_buffers[frame], &vk.RenderingInfo{
+                    .color_attachment_count = 0,
+                    .view_mask = 0,
+                    .render_area = .{
+                        .offset = .{
+                            .x = 0,
+                            .y = 0,
+                        },
+                        .extent = .{
+                            .width = shadow_side_len,
+                            .height = shadow_side_len,
+                        },
+                    },
+                    .flags = .{},
+                    .layer_count = 1,
+                    .p_depth_attachment = &vk.RenderingAttachmentInfo{
+                        .clear_value = .{
+                            .depth_stencil = .{
+                                .depth = 1.0,
+                                .stencil = undefined,
+                            },
+                        },
+                        .image_layout = .depth_attachment_optimal,
+                        .image_view = shadow_image_view,
+                        .load_op = .clear,
+                        .store_op = .store,
+                        .resolve_mode = .{},
+                        .resolve_image_layout = .undefined,
+                    },
+                });
+                vkd.cmdSetViewport(command_buffers[frame], 0, 1, @ptrCast(&vk.Viewport{
+                    .x = 0.0,
+                    .y = 0.0,
+                    .width = @floatFromInt(shadow_side_len),
+                    .height = @floatFromInt(shadow_side_len),
+                    .min_depth = 0.0,
+                    .max_depth = 1.0,
+                }));
+
+                vkd.cmdSetScissor(command_buffers[frame], 0, 1, @ptrCast(&vk.Rect2D{
+                    .extent = .{
+                        .width = shadow_side_len,
+                        .height = shadow_side_len,
+                    },
+                    .offset = .{
+                        .x = 0,
+                        .y = 0,
+                    },
+                }));
+
+                vkd.cmdBindPipeline(
+                    command_buffers[frame],
+                    .graphics,
+                    shadow_pipeline,
+                );
+
+                vkd.cmdBindDescriptorBuffersEXT(
+                    command_buffers[frame],
+                    1,
+                    @ptrCast(&vk.DescriptorBufferBindingInfoEXT{
+                        .address = descriptor_buffer_device_address,
+                        .usage = descriptor_buffer_create_info.usage,
+                    }),
+                );
+                vkd.cmdSetDescriptorBufferOffsets2EXT(
+                    command_buffers[frame],
+                    &vk.SetDescriptorBufferOffsetsInfoEXT{
+                        .first_set = 0,
+                        .set_count = 1,
+                        .layout = color_pipeline_layout,
+                        .stage_flags = .{
+                            .vertex_bit = true,
+                        },
+                        .p_buffer_indices = &[_]u32{0},
+                        .p_offsets = &[_]vk.DeviceSize{0},
+                    },
+                );
+
+                vkd.cmdBindVertexBuffers(
+                    command_buffers[frame],
+                    0,
+                    1,
+                    @ptrCast(&surface_buffer),
+                    @ptrCast(&@as(vk.DeviceSize, 0)),
+                );
+
+                vkd.cmdDraw(command_buffers[frame], 4, surfaces_len, 0, 0);
+
+                vkd.cmdEndRendering(command_buffers[frame]);
+            }
             vkd.cmdPipelineBarrier2(
                 command_buffers[frame],
                 &vk.DependencyInfo{
-                    .image_memory_barrier_count = image_memory_barriers_len,
-                    .p_image_memory_barriers = &image_memory_barriers,
-                    .buffer_memory_barrier_count = 1,
-                    .p_buffer_memory_barriers = @ptrCast(&vk.BufferMemoryBarrier2{
-                        .buffer = surface_buffer,
-                        .offset = 0,
-                        .size = surface_buffer_create_info.size,
+                    .image_memory_barrier_count = 1,
+                    .p_image_memory_barriers = @ptrCast(&vk.ImageMemoryBarrier2{
+                        .image = shadow_image,
                         .src_stage_mask = .{
-                            .copy_bit = true,
+                            .early_fragment_tests_bit = true,
+                            .late_fragment_tests_bit = true,
                         },
                         .dst_stage_mask = .{
-                            .copy_bit = true,
+                            .fragment_shader_bit = true,
                         },
                         .src_access_mask = .{
-                            .transfer_write_bit = true,
+                            .depth_stencil_attachment_write_bit = true,
                         },
                         .dst_access_mask = .{
-                            .transfer_write_bit = true,
+                            .depth_stencil_attachment_read_bit = true,
                         },
+                        .old_layout = .depth_attachment_optimal,
+                        .new_layout = .depth_read_only_optimal,
                         .src_queue_family_index = 0,
                         .dst_queue_family_index = 0,
+                        .subresource_range = .{
+                            .aspect_mask = .{
+                                .depth_bit = true,
+                            },
+                            .base_array_layer = 0,
+                            .base_mip_level = 0,
+                            .layer_count = 1,
+                            .level_count = 1,
+                        },
                     }),
                 },
             );
-
+            // color pass
             {
                 vkd.cmdBeginRendering(command_buffers[frame], &vk.RenderingInfo{
                     .view_mask = 0,
@@ -1591,7 +2130,7 @@ pub fn main() !void {
                                 },
                             },
                         },
-                        .image_layout = .rendering_local_read,
+                        .image_layout = .color_attachment_optimal,
                         .resolve_mode = .{},
                         .load_op = .clear,
                         .store_op = .store,
@@ -1605,7 +2144,7 @@ pub fn main() !void {
                                 .stencil = 0,
                             },
                         },
-                        .image_layout = .rendering_local_read,
+                        .image_layout = .depth_attachment_optimal,
                         .resolve_mode = .{},
                         .load_op = .clear,
                         .store_op = .store,
@@ -1648,9 +2187,10 @@ pub fn main() !void {
                         .layout = color_pipeline_layout,
                         .stage_flags = .{
                             .vertex_bit = true,
+                            .fragment_bit = true,
                         },
                         .p_buffer_indices = &[_]u32{0},
-                        .p_offsets = &[_]vk.DeviceSize{0},
+                        .p_offsets = &[_]vk.DeviceSize{shadow_descriptor_set_layout_size},
                     },
                 );
 
@@ -1909,7 +2449,9 @@ fn debugCallback(
             data.p_message.?,
         },
     );
-
+    if (message_severity.error_bit_ext) {
+        @panic("shit");
+    }
     return vk.FALSE;
 }
 
@@ -1963,9 +2505,9 @@ fn computeSurfacesLen(voxels: [*]const Voxel) u32 {
         if (voxels[voxel_i] == Voxel.Air) {
             continue;
         }
-        for (0..dimensions) |_dimension_i| {
-            const dimension_i: Direction = @truncate(_dimension_i);
-            const mask = morton_mask << dimension_i;
+        for (0..directions) |_direction_i| {
+            const direction_i: Direction = @truncate(_direction_i);
+            const mask = morton_mask << direction_i;
             const coord = pext(usize, voxel_i, mask);
             const cleaned_voxel_i = voxel_i & ~mask;
 
@@ -1992,27 +2534,18 @@ fn generateSurfaces(voxels: [*]const Voxel, surfaces: [*]Surface) void {
         }
 
         var combined_indices: CombinedIndices = 0;
-        for (0..dimensions) |_dimension_i| {
-            const dimension_i: Direction = @truncate(_dimension_i);
-            // surface[dimension_i] = pext(usize, voxel_i, morton_mask << dimension_i);
+        for (0..directions) |_direction_i| {
+            const direction_i: Direction = @truncate(_direction_i);
             combined_indices <<= log_side_len;
-            combined_indices |= @truncate(pext(usize, voxel_i, morton_mask << dimension_i));
+            combined_indices |= @truncate(pext(usize, voxel_i, morton_mask << direction_i));
         }
-        for (0..dimensions) |_direction| {
+        for (0..directions) |_direction| {
             const direction: Direction = @truncate(_direction);
             const mask = morton_mask << direction;
             const coord = pext(usize, voxel_i, mask);
 
             const cleaned_voxel_i = voxel_i & ~mask;
 
-            // if (coord == 0) {
-            //     surfaces[surface_i] = surface | (dimension_i << 1) | 0;
-            // } else {
-            //     const air_voxel_i = cleaned_voxel_i | pdep(usize, coord - 1, mask);
-            //     if (voxels[air_voxel_i] == Voxel.Air) {
-            //         const surrounding_air = computeSurroundingAir(voxels.ptr, air_voxel_i);
-            //     }
-            // }
             {
                 var surface = Surface{
                     .direction_sign = 0,
@@ -2022,7 +2555,7 @@ fn generateSurfaces(voxels: [*]const Voxel, surfaces: [*]Surface) void {
                     .direction_hints = undefined,
                 };
                 if (coord == 0) {
-                    surface.surrounding_air = (dimensions << 1) - 1;
+                    surface.surrounding_air = (directions << 1) - 1;
                     surfaces[surface_i] = surface;
                     surface_i += 1;
                 } else {
@@ -2044,7 +2577,7 @@ fn generateSurfaces(voxels: [*]const Voxel, surfaces: [*]Surface) void {
                     .direction_hints = undefined,
                 };
                 if (coord == side_len - 1) {
-                    surface.surrounding_air = (dimensions << 1) - 1;
+                    surface.surrounding_air = (directions << 1) - 1;
                     surfaces[surface_i] = surface;
                     surface_i += 1;
                 } else {
@@ -2063,9 +2596,9 @@ fn generateSurfaces(voxels: [*]const Voxel, surfaces: [*]Surface) void {
 
 fn computeSurroundingAir(voxels: [*]const Voxel, voxel_i: usize) SurroundingAir {
     var surrounding_air: SurroundingAir = 0;
-    for (0..dimensions) |_dimenion_i| {
-        const dimension_i: Direction = @truncate(_dimenion_i);
-        const mask = morton_mask << dimension_i;
+    for (0..directions) |_dimenion_i| {
+        const direction_i: Direction = @truncate(_dimenion_i);
+        const mask = morton_mask << direction_i;
         const coord = pext(usize, voxel_i, mask);
         const cleaned_voxel_i = voxel_i & ~mask;
 
@@ -2081,7 +2614,7 @@ fn computeSurroundingAir(voxels: [*]const Voxel, voxel_i: usize) SurroundingAir 
             surrounding_air += 1;
         }
     }
-    if (surrounding_air >= dimensions << 1) {
+    if (surrounding_air >= directions << 1) {
         @panic("wtf");
     }
 
@@ -2090,7 +2623,7 @@ fn computeSurroundingAir(voxels: [*]const Voxel, voxel_i: usize) SurroundingAir 
 
 fn computeDirectionHints(voxels: [*]const Voxel, voxel_i: usize, major_direction: Direction) DirectionHints {
     var direction_hints: DirectionHints = 0;
-    for (0..dimensions) |_direction| {
+    for (0..directions) |_direction| {
         const direction: Direction = @truncate(_direction);
         if (major_direction == direction) {
             continue;
@@ -2116,4 +2649,157 @@ fn computeDirectionHints(voxels: [*]const Voxel, voxel_i: usize, major_direction
     return direction_hints;
 }
 
-fn computeLightAffine(_: camera.Uniform) void {}
+fn computeLightAffine(
+    position: [directions]f32,
+    light_direction: [directions]f32,
+    angles: [directions - 1]f32,
+    near: f32,
+    far: f32,
+    near_scale: [directions - 1]f32,
+) [directions][directions + 1]f32 {
+    if (directions != 3) {
+        unreachable;
+    }
+    var frustum: [1 << directions][directions]f32 = undefined;
+
+    for (0..1 << (directions - 1)) |corner| {
+        for (0..directions - 1) |_direction| {
+            const direction: Direction = @truncate(_direction);
+            frustum[corner][direction] =
+                if ((corner >> direction) & 1 == 1)
+                    near_scale[direction]
+                else
+                    -near_scale[direction];
+        }
+        frustum[corner][directions - 1] = 0.0;
+    }
+    for (1 << (directions - 1)..1 << directions) |corner| {
+        for (0..directions - 1) |_direction| {
+            const direction: Direction = @truncate(_direction);
+            frustum[corner][direction] = (far / near) *
+                if ((corner >> direction) & 1 == 1)
+                    near_scale[direction]
+                else
+                    -near_scale[direction];
+        }
+        frustum[corner][directions - 1] = far - near;
+    }
+
+    var light_frame: [directions][directions + 1]f32 = undefined;
+    for (0..directions) |direction| {
+        light_frame[directions - 1][direction] = light_direction[direction];
+    }
+    for (1..directions) |_new_frame_direction| {
+        const new_frame_direction = directions - 1 - _new_frame_direction;
+        for (0..directions) |direction| {
+            light_frame[new_frame_direction][direction] =
+                if (direction == new_frame_direction) 1.0 else 0.0;
+        }
+        for (0.._new_frame_direction) |_frame_direction| {
+            const frame_direction = directions - 1 - _frame_direction;
+            const dot: f32 = dotProduct(
+                directions,
+                &light_frame[new_frame_direction],
+                &light_frame[frame_direction],
+            );
+            for (0..directions) |direction| {
+                light_frame[new_frame_direction][direction] -= dot * light_frame[frame_direction][direction];
+            }
+        }
+        normalize(directions, &light_frame[new_frame_direction]);
+    }
+
+    var min: [directions]f32 = undefined;
+    var max: [directions]f32 = undefined;
+    for (0..directions) |direction| {
+        min[direction] = std.math.inf(f32);
+        max[direction] = -std.math.inf(f32);
+    }
+    // camera frustum
+    for (0..1 << directions) |corner| {
+        {
+            const cos = frustum[corner][2];
+            const sin = frustum[corner][1];
+
+            frustum[corner][2] = @cos(angles[1]) * cos - @sin(angles[1]) * sin;
+            frustum[corner][1] = @sin(angles[1]) * cos + @cos(angles[1]) * sin;
+        }
+        {
+            const cos = frustum[corner][2];
+            const sin = frustum[corner][0];
+
+            frustum[corner][2] = @cos(angles[0]) * cos - @sin(angles[0]) * sin;
+            frustum[corner][0] = @sin(angles[0]) * cos + @cos(angles[0]) * sin;
+        }
+        for (0..directions) |direction| {
+            frustum[corner][direction] += position[direction];
+        }
+
+        // apply affine
+        for (0..directions) |frame_direction| {
+            const dot: f32 = dotProduct(
+                directions,
+                &frustum[corner],
+                &light_frame[frame_direction],
+            );
+            if (dot < min[frame_direction]) {
+                min[frame_direction] = dot;
+            } else if (dot > max[frame_direction]) {
+                max[frame_direction] = dot;
+            }
+        }
+    }
+    // geometry box
+    for (0..1 << directions) |corner| {
+        var point: [directions]f32 = undefined;
+        for (0..directions) |_direction| {
+            const direction: Direction = @truncate(_direction);
+            point[direction] =
+                if ((corner >> direction) & 1 == 1)
+                    0.0
+                else
+                    @floatFromInt(side_len);
+        }
+
+        const dot: f32 = dotProduct(
+            directions,
+            &point,
+            &light_frame[directions - 1],
+        );
+        if (dot < min[directions - 1]) {
+            min[directions - 1] = dot;
+        } else if (dot > max[directions - 1]) {
+            max[directions - 1] = dot;
+        }
+    }
+
+    light_frame[directions - 1][directions] = -min[directions - 1];
+    for (0..directions - 1) |frame_direction| {
+        light_frame[frame_direction][directions] = -(max[frame_direction] + min[frame_direction]) / 2.0;
+    }
+    for (0..directions + 1) |direction| {
+        light_frame[directions - 1][direction] /= max[directions - 1] - min[directions - 1];
+    }
+    for (0..directions - 1) |frame_direction| {
+        for (0..directions + 1) |direction| {
+            light_frame[frame_direction][direction] /= (max[frame_direction] - min[frame_direction]) / 2.0;
+        }
+    }
+
+    return light_frame;
+}
+
+fn dotProduct(n: usize, lhs: [*]f32, rhs: [*]f32) f32 {
+    var dot: f32 = 0.0;
+    for (0..n) |i| {
+        dot += lhs[i] * rhs[i];
+    }
+    return dot;
+}
+
+fn normalize(n: usize, v: [*]f32) void {
+    const dot = dotProduct(n, v, v);
+    for (0..n) |i| {
+        v[i] /= @sqrt(dot);
+    }
+}
