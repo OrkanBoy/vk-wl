@@ -69,8 +69,8 @@ const Uniform = extern struct {
     light: extern struct {
         affine: [directions][directions + 1]f32,
         direction: [directions]f32,
-        padding: u32,
     },
+    padding: u32,
     camera: extern struct {
         position: [directions]f32,
 
@@ -422,10 +422,10 @@ pub fn main() !void {
         null,
     );
 
-    var camera_memory_requirements: vk.MemoryRequirements2 = .{
+    var uniform_memory_requirements: vk.MemoryRequirements2 = .{
         .memory_requirements = undefined,
     };
-    const camera_buffer_create_info = vk.BufferCreateInfo{
+    const uniform_buffer_create_info = vk.BufferCreateInfo{
         .usage = .{
             .uniform_buffer_bit = true,
             .shader_device_address_bit = true,
@@ -438,17 +438,17 @@ pub fn main() !void {
     vkd.getDeviceBufferMemoryRequirements(
         device,
         &vk.DeviceBufferMemoryRequirements{
-            .p_create_info = &camera_buffer_create_info,
+            .p_create_info = &uniform_buffer_create_info,
         },
-        &camera_memory_requirements,
+        &uniform_memory_requirements,
     );
 
-    const camera_memory = try vkd.allocateMemory(
+    const uniform_memory = try vkd.allocateMemory(
         device,
         &vk.MemoryAllocateInfo{
-            .allocation_size = camera_memory_requirements.memory_requirements.size,
+            .allocation_size = uniform_memory_requirements.memory_requirements.size,
             .memory_type_index = try findMemoryTypeIndex(
-                camera_memory_requirements.memory_requirements.memory_type_bits,
+                uniform_memory_requirements.memory_requirements.memory_type_bits,
                 vk.MemoryPropertyFlags{
                     .host_coherent_bit = true,
                     .host_visible_bit = true,
@@ -464,24 +464,24 @@ pub fn main() !void {
         },
         null,
     );
-    defer vkd.freeMemory(device, camera_memory, null);
+    defer vkd.freeMemory(device, uniform_memory, null);
 
-    const camera_buffer = try vkd.createBuffer(
+    const uniform_buffer = try vkd.createBuffer(
         device,
-        &camera_buffer_create_info,
+        &uniform_buffer_create_info,
         null,
     );
     defer vkd.destroyBuffer(
         device,
-        camera_buffer,
+        uniform_buffer,
         null,
     );
     _ = try vkd.bindBufferMemory2(
         device,
         1,
         @ptrCast(&vk.BindBufferMemoryInfo{
-            .buffer = camera_buffer,
-            .memory = camera_memory,
+            .buffer = uniform_buffer,
+            .memory = uniform_memory,
             .memory_offset = 0,
         }),
     );
@@ -623,7 +623,7 @@ pub fn main() !void {
 
     const uniform: *Uniform = @ptrCast(@alignCast(try vkd.mapMemory2(device, &vk.MemoryMapInfo{
         .flags = .{},
-        .memory = camera_memory,
+        .memory = uniform_memory,
         .offset = 0,
         .size = @sizeOf(Uniform),
     })));
@@ -635,6 +635,7 @@ pub fn main() !void {
             .descriptor_type = .uniform_buffer,
             .stage_flags = .{
                 .vertex_bit = true,
+                .fragment_bit = true,
             },
         },
         vk.DescriptorSetLayoutBinding{
@@ -790,7 +791,7 @@ pub fn main() !void {
                     .address = vkd.getBufferDeviceAddress(
                         device,
                         &vk.BufferDeviceAddressInfo{
-                            .buffer = camera_buffer,
+                            .buffer = uniform_buffer,
                         },
                     ),
                 },
@@ -810,7 +811,7 @@ pub fn main() !void {
                     .address = vkd.getBufferDeviceAddress(
                         device,
                         &vk.BufferDeviceAddressInfo{
-                            .buffer = camera_buffer,
+                            .buffer = uniform_buffer,
                         },
                     ),
                 },
@@ -1097,14 +1098,14 @@ pub fn main() !void {
                     }),
                 },
                 .p_rasterization_state = &vk.PipelineRasterizationStateCreateInfo{
-                    .cull_mode = .{ .back_bit = true },
+                    .cull_mode = .{ .front_bit = true },
                     .front_face = .counter_clockwise,
                     .polygon_mode = .fill,
                     .depth_bias_enable = vk.TRUE,
                     .depth_clamp_enable = vk.FALSE,
                     .depth_bias_clamp = 0.0,
-                    .depth_bias_constant_factor = 1.0,
-                    .depth_bias_slope_factor = 1.0,
+                    .depth_bias_constant_factor = 0.0,
+                    .depth_bias_slope_factor = -0.5,
                     .line_width = 1.0,
                     .rasterizer_discard_enable = vk.FALSE,
                 },
@@ -1339,13 +1340,9 @@ pub fn main() !void {
 
     var camera_speed: f32 = 4.0;
 
-    var rand = std.Random.DefaultPrng.init(@bitCast(std.time.microTimestamp()));
-    const random = rand.random();
-    var light_direction: [directions]f32 = undefined;
-    for (0..directions) |direction| {
-        light_direction[direction] = random.float(f32);
-    }
-    normalize(directions, &light_direction);
+    // var rand = std.Random.DefaultPrng.init(@bitCast(std.time.microTimestamp()));
+    // const random = rand.random();
+    var light_angle: f32 = 0.0;
 
     const side: f32 = (side_len / @sqrt(@as(f32, @floatFromInt(directions)))) - 2.0;
     uniform.camera.position[0] = side;
@@ -1358,9 +1355,16 @@ pub fn main() !void {
         if (display.roundtrip() != .SUCCESS) return error.RoundtripFailed;
 
         const new_time = nanoTimestamp();
-        const delta_time = new_time - time;
+        const dt = @as(f32, @floatFromInt(new_time - time)) / 1_000_000_000.0;
         time = new_time;
 
+        light_angle += dt * 0.05;
+        light_angle = @max(tau, light_angle);
+        const light_direction: [directions]f32 = .{
+            @sin(0.3) / @sqrt(2.0),
+            @sin(0.3) / @sqrt(2.0),
+            @cos(0.3),
+        };
         {
             if (camera_keyboard.locked_pointer_toggle) {
                 if (locked_pointer == null) {
@@ -1410,8 +1414,6 @@ pub fn main() !void {
             zx_half_range /= range_rotate_factor;
 
             if (locked_pointer != null) {
-                const dt: f32 = @as(f32, @floatFromInt(delta_time)) / 1_000_000_000.0;
-
                 if (camera_pointer.speedup and !camera_pointer.speeddown) {
                     camera_speed += dt;
                 } else if (!camera_pointer.speedup and camera_pointer.speeddown) {
@@ -2619,34 +2621,6 @@ fn computeSurroundingAir(voxels: [*]const Voxel, voxel_i: usize) SurroundingAir 
     return surrounding_air;
 }
 
-fn computeDirectionHints(voxels: [*]const Voxel, voxel_i: usize, major_direction: Direction) DirectionHints {
-    var direction_hints: DirectionHints = 0;
-    for (0..directions) |_direction| {
-        const direction: Direction = @truncate(_direction);
-        if (major_direction == direction) {
-            continue;
-        }
-        const mask = morton_mask << direction;
-        const coord = pext(usize, voxel_i, mask);
-        const cleaned_voxel_i = voxel_i & ~mask;
-
-        direction_hints <<= 2;
-        direction_hints |= 1;
-
-        if (coord != 0 and
-            voxels[cleaned_voxel_i | pdep(usize, coord - 1, mask)] != Voxel.Air)
-        {
-            direction_hints += 1;
-        }
-        if (coord != side_len - 1 and
-            voxels[cleaned_voxel_i | pdep(usize, coord + 1, mask)] != Voxel.Air)
-        {
-            direction_hints -= 1;
-        }
-    }
-    return direction_hints;
-}
-
 fn computeLightAffine(
     position: [directions]f32,
     light_direction: [directions]f32,
@@ -2687,6 +2661,9 @@ fn computeLightAffine(
     for (0..directions) |direction| {
         light_frame[directions - 1][direction] = light_direction[direction];
     }
+    // var rand = std.Random.DefaultPrng.init(@bitCast(std.time.microTimestamp()));
+    // const random = rand.random();
+
     for (1..directions) |_new_frame_direction| {
         const new_frame_direction = directions - 1 - _new_frame_direction;
         for (0..directions) |direction| {
@@ -2795,3 +2772,75 @@ fn normalize(n: usize, v: [*]f32) void {
         v[i] /= @sqrt(dot);
     }
 }
+
+// fn computeVisibleVoxelsLen(
+//     voxels: [*]Voxel,
+//     voxels_log_side_len: usize,
+//     camera_position: [directions]f32,
+//     camera_angles: [directions - 1]f32,
+//     camera_bounds: [directions - 1]f32,
+//     camera_projection_bound: f32,
+// ) usize {
+//     var intersect: bool = false;
+//     for (0..1 << directions) |corner| {
+//         var position: [directions]f32 = undefined;
+//         for (0..directions) |direction| {
+//             position[direction] =
+//                 if ((corner >> direction) & 1 == 1)
+//                     0.0
+//                 else
+//                     @floatFromInt(1 << voxels_log_side_len);
+//
+//             position[direction] -= camera_position[direction];
+//         }
+//
+//         for (0..directions - 1) |direction| {
+//             const adj = position[directions - 1];
+//             const opp = position[direction];
+//             position[directions - 1] =
+//                 adj * @cos(camera_angles[direction]) +
+//                 opp * @sin(camera_angles[direction]);
+//             position[direction] =
+//                 opp * @cos(camera_angles[direction]) -
+//                 adj * @sin(camera_angles[direction]);
+//         }
+//
+//         if (position[directions - 1] < 0.0 or camera_projection_bound < position[directions - 1]) {
+//             continue;
+//         }
+//
+//         for (0..directions - 1) |direction| {
+//             const bound = camera_bounds[direction] * position[directions - 1];
+//             if (position[direction] < -bound or bound < position[direction]) {
+//                 continue;
+//             }
+//         }
+//         intersect = true;
+//         break;
+//     }
+//
+//     if (voxels_log_side_len == 0) {
+//         return 1;
+//     } else {
+//         var len: usize = 0;
+//         for (0..1 << directions) |sub_block| {
+//             const sub_camera_position = camera_position;
+//             for (0..directions) |direction| {
+//                 if ((sub_block >> direction) & 1 == 1) {
+//                     sub_camera_position[direction] -= @floatFromInt(1 << (voxels_log_side_len - 1));
+//                 }
+//             }
+//
+//             len += computeVisibleVoxelsLen(
+//                 &voxels[sub_block * (1 << (directions * (voxels_log_side_len - 1)))],
+//                 voxels_log_side_len - 1,
+//                 sub_camera_position,
+//                 camera_angles,
+//                 camera_bounds,
+//                 camera_near,
+//                 camera_far,
+//             );
+//         }
+//         return len;
+//     }
+// }
