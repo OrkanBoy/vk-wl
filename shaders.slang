@@ -3,7 +3,7 @@ struct VSInput {
   uint32_t surface;
 };
 
-namespace color {
+namespace lighting {
 struct Uniform {
   Light light;
   Camera camera;
@@ -45,7 +45,7 @@ static const float specular_strength = 0.20;
 static const float ambient_strength = 1.0 - diffuse_strength - specular_strength;
 
 [shader("vertex")]
-VSOutput vertexColor(VSInput input, uint vertex_id: SV_VertexID) {
+VSOutput vertexLighting(VSInput input, uint vertex_id: SV_VertexID) {
   VSOutput output;
 
   vector<float32_t, 3> position;
@@ -132,7 +132,7 @@ VSOutput vertexColor(VSInput input, uint vertex_id: SV_VertexID) {
 Sampler2DShadow shadow;
 
 [shader("fragment")]
-vector<float32_t, 4> fragmentColor(VSOutput input) {
+vector<float32_t, 4> fragmentLighting(VSOutput input) {
   float32_t x = input.light_view_position.x / 2.0 + 0.5;
   float32_t y = input.light_view_position.y / 2.0 + 0.5;
   float32_t z = input.light_view_position.z;
