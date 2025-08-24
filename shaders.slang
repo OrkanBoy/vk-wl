@@ -2,205 +2,19 @@ struct VSInput {
   [[vk::location(0)]]
   uint32_t surface;
 };
-
-namespace lighting {
 struct Uniform {
-  Light light;
-  Camera camera;
-};
+  float4 light_affine[3];
 
-struct Light {
-  vector<float32_t, directions + 1> affine[directions];
-  vector<float32_t, directions> direction;
-  uint32_t padding;
+  float3 light_direction;
+  uint padding;
+
+  float3 camera_position;
+  float  camera_near;
+
+  float2 camera_cos;
+  float2 camera_sin;
+  float2 camera_scale;
 }
-
-struct Camera {
-  vector<float32_t, directions> position;
-
-  float32_t near;
-
-  vector<float32_t, directions - 1> cos;
-  vector<float32_t, directions - 1> sin;
-  vector<float32_t, directions - 1> scale;
-};
-
-[vk_binding(0, 0)]
-ConstantBuffer<Uniform> uniform;
-
-struct VSOutput {
-  vector<float32_t, directions + 1> clip_position : SV_Position;
-  vector<float32_t, directions> world_position;
-  vector<float32_t, directions> light_view_position;
-
-  nointerpolation float32_t diffuse;
-  nointerpolation float32_t ambient;
-  nointerpolation vector<float32_t, 3> color;
-  nointerpolation uint surface_direction;
-  nointerpolation uint surface_direction_sign;
-};
-
-static const float diffuse_strength = 0.60;
-static const float specular_strength = 0.20;
-static const float ambient_strength = 1.0 - diffuse_strength - specular_strength;
-
-[shader("vertex")]
-VSOutput vertexLighting(VSInput input, uint vertex_id: SV_VertexID) {
-  VSOutput output;
-
-  vector<float32_t, 3> position;
-
-  uint surface = input.surface;
-  for (uint direction = 0; direction != directions; direction += 1) {
-    position[directions - direction - 1] =
-        float(surface & ((1 << log_side_len) - 1));
-    surface >>= log_side_len;
-  }
-  uint surface_direction = surface & ((1 << log_directions) - 1);
-  surface >>= log_directions;
-  uint surface_direction_sign = surface & 1;
-  surface >>= 1;
-  uint surface_surrounding_air = surface & ((1 << log_surrounding_air) - 1);
-
-  output.surface_direction = surface_direction;
-  output.surface_direction_sign = surface_direction_sign;
-
-  float ambient = float(surface_surrounding_air) / float(max_surrounding_air);
-  ambient *= ambient_strength;
-
-
-  float diffuse = uniform.light.direction[surface_direction];
-  if (surface_direction_sign == 1) {
-    diffuse = -uniform.light.direction[surface_direction];
-  }
-  diffuse = max(0.0, diffuse);
-  diffuse *= diffuse_strength;
-
-
-  position[surface_direction] += float(surface_direction_sign);
-  if (surface_direction_sign == 1) {
-    switch (vertex_id) {
-    case 1:
-      vertex_id = 2;
-      break;
-    case 2:
-      vertex_id = 1;
-    }
-  }
-  position[(surface_direction + 2) % directions] += float((vertex_id & 0b01) >> 0);
-  position[(surface_direction + 1) % directions] += float((vertex_id & 0b10) >> 1);
-
-  output.world_position = position;
-
-  for (uint direction_i = 0; direction_i != directions; direction_i += 1) {
-    output.color[direction_i] =
-        float(surface_direction_sign ^ (direction_i != surface_direction));
-  }
-  output.ambient = ambient;
-  output.diffuse = diffuse;
-
-  output.light_view_position = applyAffine(position, uniform.light.affine);
-
-  position -= uniform.camera.position;
-
-  for (uint direction = 0; direction != directions - 1; direction += 1) {
-    float adj = position[2];
-    float opp = position[direction];
-    position[directions - 1] = 
-      adj * uniform.camera.cos[direction] + 
-      opp * uniform.camera.sin[direction];
-    position[direction] = 
-      opp * uniform.camera.cos[direction] - 
-      adj * uniform.camera.sin[direction];
-  }
-
-  position.z += uniform.camera.near;
-
-  for (uint direction = 0; direction != directions - 1; direction += 1) {
-    position[direction] *= uniform.camera.scale[direction];
-  }
-
-  output.clip_position = {
-    position.x,
-    position.y,
-    uniform.camera.near,
-    position.z,
-  };
-  return output;
-}
-[vk_binding(1, 0)]
-Sampler2DShadow shadow;
-
-[shader("fragment")]
-vector<float32_t, 4> fragmentLighting(VSOutput input) {
-  float32_t x = input.light_view_position.x / 2.0 + 0.5;
-  float32_t y = input.light_view_position.y / 2.0 + 0.5;
-  float32_t z = input.light_view_position.z;
-
-  float light = shadow.SampleCmp(float2(x, y), z);
-
-  float3 camera_direction = normalize(input.world_position - uniform.camera.position);
-  float3 halfway = normalize(uniform.light.direction + camera_direction);
-  float specular = halfway[input.surface_direction] / length(halfway);
-  if (input.surface_direction_sign == 1) {
-    specular = -specular;
-  }
-  specular = pow(max(0.0, specular), 2);
-  specular *= specular_strength;
-
-  return { input.color * ((input.diffuse + specular) * light + input.ambient), 1.0 };
-}
-}
-
-namespace shadow {
-struct Uniform {
-  vector<float32_t, directions + 1> light_affine[directions];
-  vector<float32_t, directions> light_direction;
-};
-[vk_binding(0,0)] 
-ConstantBuffer<Uniform> uniform;
-
-struct VSOutput {
-  nointerpolation vector<float32_t, 4> position : SV_Position;
-};
-
-[shader("vertex")]
-VSOutput vertexShadow(VSInput input, uint vertex_id: SV_VertexID) {
-  VSOutput output;
-
-  vector<float32_t, 3> position;
-
-  uint surface = input.surface;
-  for (uint _direction_i = 0; _direction_i != directions; _direction_i += 1) {
-    uint direction_i = directions - 1 - _direction_i;
-    position[direction_i] = float(surface & ((1 << log_side_len) - 1));
-    surface >>= log_side_len;
-  }
-  uint surface_direction = surface & ((1 << log_directions) - 1);
-  surface >>= log_directions;
-  uint surface_direction_sign = surface & 1;
-  surface >>= 1;
-
-  position[surface_direction] += float(surface_direction_sign);
-
-  if (surface_direction_sign == 1) {
-    switch (vertex_id) {
-    case 1:
-      vertex_id = 2;
-      break;
-    case 2:
-      vertex_id = 1;
-    }
-  }
-  position[(surface_direction + 2) % directions] += float((vertex_id & 0b01) >> 0);
-  position[(surface_direction + 1) % directions] += float((vertex_id & 0b10) >> 1);
-
-  position = applyAffine(position, uniform.light_affine);
-  output.position = { position[0], position[1], position[2], 1.0 };
-  return output;
-}
-}
-
 
 vector<T, N> applyAffine<T : __BuiltinFloatingPointType, let N : int>(
     vector<T, N> input, vector<T, N + 1> affine[N], ) {
@@ -219,7 +33,180 @@ static const uint log_side_len = 0x5;
 static const uint directions = 3;
 static const uint log_directions = uint(ceil(log2(float(directions))));
 
-static const uint max_surrounding_air = (directions << 1) - 1;
-static const uint log_surrounding_air = uint(ceil(log2(float(max_surrounding_air))));
+namespace shadow {
+[vk_binding(0,0)] 
+ConstantBuffer<Uniform> uniform;
+
+struct VSOutput {
+  noperspective float4 position : SV_Position;
+};
+
+[shader("vertex")]
+VSOutput vertexShadow(VSInput input, uint vertex_id: SV_VertexID) {
+  VSOutput output;
+
+  float3 position;
+
+  var surface = input.surface;
+  for (uint _direction = 0; _direction != directions; _direction += 1) {
+    uint direction = directions - 1 - _direction;
+    position[direction] = float(surface & ((1 << log_side_len) - 1));
+    surface >>= log_side_len;
+  }
+  let surface_direction_unsigned = surface & ((1 << log_directions) - 1);
+  surface >>= log_directions;
+  let surface_direction_sign = surface & 1;
+  surface >>= 1;
+
+  position[surface_direction_unsigned] += float(surface_direction_sign);
+
+  if (surface_direction_sign == 1) {
+    switch (vertex_id) {
+    case 1:
+      vertex_id = 2;
+      break;
+    case 2:
+      vertex_id = 1;
+    }
+  }
+  position[(surface_direction_unsigned + 2) % directions] += float((vertex_id & 0b01) >> 0);
+  position[(surface_direction_unsigned + 1) % directions] += float((vertex_id & 0b10) >> 1);
+
+  position = applyAffine(position, uniform.light_affine);
+  output.position = { 
+    position[0], 
+    position[1], 
+    position[2], 
+    1.0,
+  };
+  return output;
+}
+}
 
 
+namespace geometry {
+[vk_binding(0,0)]
+ConstantBuffer<Uniform> uniform;
+
+struct VSOutput {
+  float4 clip_position: SV_Position;
+  uint32_t surface_direction_signed;
+};
+
+
+[shader("vertex")]
+VSOutput vertexGeometry(VSInput input, uint vertex_id: SV_VertexID) {
+  VSOutput output;
+
+  float3 position;
+
+  var surface = input.surface;
+  for (uint _direction = 0; _direction != directions; _direction += 1) {
+    uint direction = directions - _direction - 1;
+    position[direction] =
+        float(surface & ((1 << log_side_len) - 1));
+    surface >>= log_side_len;
+  }
+  output.surface_direction_signed = surface & ((1 << (log_directions + 1)) - 1);
+  let surface_direction_unsigned = surface & ((1 << log_directions) - 1);
+  surface >>= log_directions;
+  let surface_direction_sign = surface & 1;
+  surface >>= 1;
+
+  position[surface_direction_unsigned] += float(surface_direction_sign);
+  if (surface_direction_sign == 1) {
+    switch (vertex_id) {
+    case 1:
+      vertex_id = 2;
+      break;
+    case 2:
+      vertex_id = 1;
+    }
+  }
+  position[(surface_direction_unsigned + 2) % directions] += float((vertex_id & 0b01) >> 0);
+  position[(surface_direction_unsigned + 1) % directions] += float((vertex_id & 0b10) >> 1);
+
+  position -= uniform.camera_position;
+
+  for (var direction = 0; direction != directions - 1; direction += 1) {
+    let adj = position[directions - 1];
+    let opp = position[direction];
+    position[directions - 1] = 
+      adj * uniform.camera_cos[direction] + 
+      opp * uniform.camera_sin[direction];
+    position[direction] = 
+      opp * uniform.camera_cos[direction] - 
+      adj * uniform.camera_sin[direction];
+  }
+
+  position[directions - 1] += uniform.camera_near;
+
+  for (var direction = 0; direction != directions - 1; direction += 1) {
+    position[direction] *= uniform.camera_scale[direction];
+  }
+
+  output.clip_position = {
+    position[0],
+    position[1],
+    uniform.camera_near,
+    position[2],
+  };
+  return output;
+}
+
+[shader("fragment")]
+uint fragmentGeometry(VSOutput input) {
+  return input.surface_direction_signed;
+}
+}
+
+namespace lighting {
+struct VSOutput {
+  noperspective float4 clip_position: SV_Position;
+  noperspective float2 sample_position;
+}
+static const float2 positions[3] = {
+  float2(-3,  1),
+  float2( 1,  1),
+  float2( 1, -3),
+};
+
+[shader("vertex")]
+VSOutput vertexLighting(uint vertex_id: SV_VertexID) {
+  VSOutput output;
+  output.clip_position = {positions[vertex_id], 0.0, 1.0};
+  output.sample_position = positions[vertex_id] * 0.5 + 0.5;
+  return output;
+}
+
+[vk_binding(0,0)]
+ConstantBuffer<Uniform> uniform;
+[vk_binding(1,0)]
+Sampler2DShadow shadow_sampler;
+[vk_binding(2,0)]
+Sampler2DShadow depth_sampler;
+[vk_binding(3,0)]
+Sampler2D<uint> surface_direction_sampler;
+
+[shader("fragment")]
+float3 fragmentLighting(VSOutput input) {
+  let depth = depth_sampler.Sample(input.sample_position);
+  if (depth == 0.0) {
+    return {0.0, 0.0, 0.0};
+  }
+
+  float3 output; 
+
+  var direction_signed = surface_direction_sampler.Sample(input.sample_position);
+  let direction_unsigned = direction_signed & ((1 << log_directions) - 1);
+  direction_signed >>= log_directions;
+  let direction_sign = direction_signed & 1;
+
+  for (var direction = 0; direction != directions; direction += 1) {
+    output[direction] = float(direction_sign ^ (direction != direction_unsigned));
+  }
+  
+  return output;
+}
+
+}

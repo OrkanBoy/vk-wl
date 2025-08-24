@@ -26,12 +26,9 @@ const Surface = packed struct {
     combined_indices: CombinedIndices,
     direction: Direction,
     direction_sign: u1,
-    surrounding_air: SurroundingAir,
 };
 const CombinedIndices = UnsignedInt(directions * log_side_len);
 const Direction = UnsignedInt(log2_int_ceil(usize, directions));
-const SurroundingAir = UnsignedInt(log2_int_ceil(usize, directions * 2));
-const DirectionHints = UnsignedInt((directions - 1) * 2);
 
 const LogUsize = std.math.Log2Int(usize);
 
@@ -422,19 +419,35 @@ pub fn main() !void {
         null,
     );
 
+    var surface_direction_memory: vk.DeviceMemory = .null_handle;
+    defer vkd.freeMemory(
+        device,
+        surface_direction_memory,
+        null,
+    );
+    var surface_direction_image: vk.Image = .null_handle;
+    defer vkd.destroyImage(
+        device,
+        surface_direction_image,
+        null,
+    );
+    var surface_direction_image_view: vk.ImageView = .null_handle;
+    defer vkd.destroyImageView(
+        device,
+        surface_direction_image_view,
+        null,
+    );
+
     var uniform_memory_requirements: vk.MemoryRequirements2 = .{
         .memory_requirements = undefined,
     };
-    const uniform_buffer_create_info = vk.BufferCreateInfo{
-        .usage = .{
+    const uniform_buffer_create_info = bufferCreateInfo(
+        .{
             .uniform_buffer_bit = true,
             .shader_device_address_bit = true,
         },
-        .sharing_mode = .exclusive,
-        .queue_family_index_count = 1,
-        .p_queue_family_indices = &[_]u32{0},
-        .size = @sizeOf(Uniform),
-    };
+        @sizeOf(Uniform),
+    );
     vkd.getDeviceBufferMemoryRequirements(
         device,
         &vk.DeviceBufferMemoryRequirements{
@@ -488,37 +501,25 @@ pub fn main() !void {
 
     const log_shadow_side_len = 0xa;
     const shadow_side_len = 1 << log_shadow_side_len;
-    const shadow_create_image_info: vk.ImageCreateInfo = .{
-        .array_layers = 1,
-        .extent = .{
-            .width = shadow_side_len,
-            .height = shadow_side_len,
-            .depth = 1,
-        },
-        .flags = .{},
-        .format = .d32_sfloat,
-        .image_type = .@"2d",
-        .initial_layout = .undefined,
-        .mip_levels = 1,
-        .samples = .{
-            .@"1_bit" = true,
-        },
-        .sharing_mode = .exclusive,
-        .queue_family_index_count = 1,
-        .p_queue_family_indices = &[_]u32{0},
-        .tiling = .optimal,
-        .usage = .{
-            .depth_stencil_attachment_bit = true,
-            .sampled_bit = true,
-        },
+    const shadow_extent: vk.Extent2D = .{
+        .width = shadow_side_len,
+        .height = shadow_side_len,
     };
+    var shadow_image_create_info: vk.ImageCreateInfo = imageCreateInfo(
+        shadow_extent,
+        .d32_sfloat,
+        vk.ImageUsageFlags{
+            .sampled_bit = true,
+            .depth_stencil_attachment_bit = true,
+        },
+    );
     var shadow_memory_requirements: vk.MemoryRequirements2 = .{
         .memory_requirements = undefined,
     };
     _ = vkd.getDeviceImageMemoryRequirements(
         device,
         &vk.DeviceImageMemoryRequirements{
-            .p_create_info = &shadow_create_image_info,
+            .p_create_info = &shadow_image_create_info,
             .plane_aspect = .{
                 .depth_bit = true,
             },
@@ -546,7 +547,7 @@ pub fn main() !void {
     );
     const shadow_image = try vkd.createImage(
         device,
-        &shadow_create_image_info,
+        &shadow_image_create_info,
         null,
     );
     defer vkd.destroyImage(
@@ -565,27 +566,13 @@ pub fn main() !void {
     );
     const shadow_image_view = try vkd.createImageView(
         device,
-        &vk.ImageViewCreateInfo{
-            .format = shadow_create_image_info.format,
-            .image = shadow_image,
-            .flags = .{},
-            .view_type = .@"2d",
-            .subresource_range = .{
-                .aspect_mask = .{
-                    .depth_bit = true,
-                },
-                .base_array_layer = 0,
-                .base_mip_level = 0,
-                .layer_count = vk.REMAINING_ARRAY_LAYERS,
-                .level_count = vk.REMAINING_MIP_LEVELS,
+        &imageViewCreateInfo(
+            shadow_image,
+            .d32_sfloat,
+            .{
+                .depth_bit = true,
             },
-            .components = .{
-                .a = .identity,
-                .b = .identity,
-                .g = .identity,
-                .r = .identity,
-            },
-        },
+        ),
         null,
     );
     defer vkd.destroyImageView(
@@ -621,20 +608,67 @@ pub fn main() !void {
         null,
     );
 
-    const uniform: *Uniform = @ptrCast(@alignCast(try vkd.mapMemory2(device, &vk.MemoryMapInfo{
+    const geometry_sampler = try vkd.createSampler(
+        device,
+        &vk.SamplerCreateInfo{
+            .address_mode_u = .clamp_to_border,
+            .address_mode_v = .clamp_to_border,
+            .address_mode_w = undefined,
+            .anisotropy_enable = vk.FALSE,
+            .border_color = .float_opaque_black,
+            .compare_enable = vk.FALSE,
+            .compare_op = .less,
+            .flags = .{},
+            .mag_filter = .nearest,
+            .min_filter = .nearest,
+            .max_anisotropy = 0,
+            .max_lod = 0,
+            .min_lod = 0,
+            .mip_lod_bias = 0,
+            .mipmap_mode = .nearest,
+            .unnormalized_coordinates = vk.FALSE,
+        },
+        null,
+    );
+    defer vkd.destroySampler(
+        device,
+        geometry_sampler,
+        null,
+    );
+
+    const uniform_memory_mapped: *Uniform = @ptrCast(@alignCast(try vkd.mapMemory2(device, &vk.MemoryMapInfo{
         .flags = .{},
         .memory = uniform_memory,
         .offset = 0,
         .size = @sizeOf(Uniform),
     })));
 
-    const lighting_descriptor_set_layout_bindings = [_]vk.DescriptorSetLayoutBinding{
+    const shadow_descriptor_set_layout_bindings = [_]vk.DescriptorSetLayoutBinding{
         vk.DescriptorSetLayoutBinding{
             .binding = 0,
             .descriptor_count = 1,
             .descriptor_type = .uniform_buffer,
             .stage_flags = .{
                 .vertex_bit = true,
+            },
+        },
+    };
+    const geometry_descriptor_set_layout_bindings = [_]vk.DescriptorSetLayoutBinding{
+        vk.DescriptorSetLayoutBinding{
+            .binding = 0,
+            .descriptor_count = 1,
+            .descriptor_type = .uniform_buffer,
+            .stage_flags = .{
+                .vertex_bit = true,
+            },
+        },
+    };
+    const lighting_descriptor_set_layout_bindings = [_]vk.DescriptorSetLayoutBinding{
+        vk.DescriptorSetLayoutBinding{
+            .binding = 0,
+            .descriptor_count = 1,
+            .descriptor_type = .uniform_buffer,
+            .stage_flags = .{
                 .fragment_bit = true,
             },
         },
@@ -646,38 +680,23 @@ pub fn main() !void {
                 .fragment_bit = true,
             },
         },
-    };
-    const shadow_descriptor_set_layout_bindings = [_]vk.DescriptorSetLayoutBinding{
         vk.DescriptorSetLayoutBinding{
-            .binding = 0,
+            .binding = 2,
             .descriptor_count = 1,
-            .descriptor_type = .uniform_buffer,
+            .descriptor_type = .combined_image_sampler,
             .stage_flags = .{
-                .vertex_bit = true,
+                .fragment_bit = true,
+            },
+        },
+        vk.DescriptorSetLayoutBinding{
+            .binding = 3,
+            .descriptor_count = 1,
+            .descriptor_type = .combined_image_sampler,
+            .stage_flags = .{
+                .fragment_bit = true,
             },
         },
     };
-
-    const lighting_descriptor_set_layout = try vkd.createDescriptorSetLayout(
-        device,
-        &vk.DescriptorSetLayoutCreateInfo{
-            .flags = .{
-                .descriptor_buffer_bit_ext = true,
-            },
-            .binding_count = lighting_descriptor_set_layout_bindings.len,
-            .p_bindings = &lighting_descriptor_set_layout_bindings,
-        },
-        null,
-    );
-    defer vkd.destroyDescriptorSetLayout(
-        device,
-        lighting_descriptor_set_layout,
-        null,
-    );
-    const lighting_descriptor_set_layout_size = vkd.getDescriptorSetLayoutSizeEXT(
-        device,
-        lighting_descriptor_set_layout,
-    );
 
     const shadow_descriptor_set_layout = try vkd.createDescriptorSetLayout(
         device,
@@ -700,19 +719,62 @@ pub fn main() !void {
         shadow_descriptor_set_layout,
     );
 
+    const geometry_descriptor_set_layout = try vkd.createDescriptorSetLayout(
+        device,
+        &vk.DescriptorSetLayoutCreateInfo{
+            .flags = .{
+                .descriptor_buffer_bit_ext = true,
+            },
+            .binding_count = geometry_descriptor_set_layout_bindings.len,
+            .p_bindings = &geometry_descriptor_set_layout_bindings,
+        },
+        null,
+    );
+    defer vkd.destroyDescriptorSetLayout(
+        device,
+        geometry_descriptor_set_layout,
+        null,
+    );
+    const geometry_descriptor_set_layout_size = vkd.getDescriptorSetLayoutSizeEXT(
+        device,
+        geometry_descriptor_set_layout,
+    );
+
+    const lighting_descriptor_set_layout = try vkd.createDescriptorSetLayout(
+        device,
+        &vk.DescriptorSetLayoutCreateInfo{
+            .flags = .{
+                .descriptor_buffer_bit_ext = true,
+            },
+            .binding_count = lighting_descriptor_set_layout_bindings.len,
+            .p_bindings = &lighting_descriptor_set_layout_bindings,
+        },
+        null,
+    );
+    defer vkd.destroyDescriptorSetLayout(
+        device,
+        lighting_descriptor_set_layout,
+        null,
+    );
+    const lighting_descriptor_set_layout_size = vkd.getDescriptorSetLayoutSizeEXT(
+        device,
+        lighting_descriptor_set_layout,
+    );
+
     var descriptor_memory_requirements: vk.MemoryRequirements2 = .{
         .memory_requirements = undefined,
     };
-    const descriptor_buffer_create_info = vk.BufferCreateInfo{
-        .usage = .{
+
+    const descriptor_buffer_create_info = bufferCreateInfo(
+        vk.BufferUsageFlags{
             .resource_descriptor_buffer_bit_ext = true,
             .shader_device_address_bit = true,
         },
-        .sharing_mode = .exclusive,
-        .queue_family_index_count = 1,
-        .p_queue_family_indices = &[_]u32{0},
-        .size = lighting_descriptor_set_layout_size + shadow_descriptor_set_layout_size,
-    };
+        0 +
+            shadow_descriptor_set_layout_size +
+            geometry_descriptor_set_layout_size +
+            lighting_descriptor_set_layout_size,
+    );
 
     vkd.getDeviceBufferMemoryRequirements(
         device,
@@ -753,7 +815,7 @@ pub fn main() !void {
     );
     defer vkd.destroyBuffer(device, descriptor_buffer, null);
 
-    const descriptor_buffer_mapped: [*]u8 = @ptrCast((try vkd.mapMemory2(
+    var descriptor_memory_mapped: [*]u8 = @ptrCast((try vkd.mapMemory2(
         device,
         &vk.MemoryMapInfo{
             .flags = .{},
@@ -772,7 +834,11 @@ pub fn main() !void {
             .memory_offset = 0,
         }),
     );
-    // print("{x}\n{x}\n", .{ descriptor_set_layout_size, descriptor_set_layout_binding_offset });
+
+    const uniform_buffer_descriptor_size =
+        physical_device_descriptor_buffer_properties.uniform_buffer_descriptor_size;
+    const combined_image_sampler_descriptor_size =
+        physical_device_descriptor_buffer_properties.combined_image_sampler_descriptor_size;
 
     const descriptor_buffer_device_address = vkd.getBufferDeviceAddress(
         device,
@@ -780,46 +846,57 @@ pub fn main() !void {
             .buffer = descriptor_buffer,
         },
     );
+
+    const uniform_buffer_address_info = vk.DescriptorAddressInfoEXT{
+        .format = .undefined,
+        .range = @sizeOf(Uniform),
+        .address = vkd.getBufferDeviceAddress(
+            device,
+            &vk.BufferDeviceAddressInfo{
+                .buffer = uniform_buffer,
+            },
+        ),
+    };
+
     vkd.getDescriptorEXT(
         device,
         &vk.DescriptorGetInfoEXT{
             .type = .uniform_buffer,
             .data = .{
-                .p_uniform_buffer = &vk.DescriptorAddressInfoEXT{
-                    .format = .undefined,
-                    .range = @sizeOf(Uniform),
-                    .address = vkd.getBufferDeviceAddress(
-                        device,
-                        &vk.BufferDeviceAddressInfo{
-                            .buffer = uniform_buffer,
-                        },
-                    ),
-                },
+                .p_uniform_buffer = &uniform_buffer_address_info,
             },
         },
-        physical_device_descriptor_buffer_properties.uniform_buffer_descriptor_size,
-        @ptrCast(descriptor_buffer_mapped),
+        uniform_buffer_descriptor_size,
+        descriptor_memory_mapped,
     );
+    descriptor_memory_mapped += uniform_buffer_descriptor_size;
+
     vkd.getDescriptorEXT(
         device,
         &vk.DescriptorGetInfoEXT{
             .type = .uniform_buffer,
             .data = .{
-                .p_uniform_buffer = &vk.DescriptorAddressInfoEXT{
-                    .format = .undefined,
-                    .range = @sizeOf(Uniform),
-                    .address = vkd.getBufferDeviceAddress(
-                        device,
-                        &vk.BufferDeviceAddressInfo{
-                            .buffer = uniform_buffer,
-                        },
-                    ),
-                },
+                .p_uniform_buffer = &uniform_buffer_address_info,
             },
         },
-        physical_device_descriptor_buffer_properties.uniform_buffer_descriptor_size,
-        @ptrCast(descriptor_buffer_mapped + shadow_descriptor_set_layout_size),
+        uniform_buffer_descriptor_size,
+        descriptor_memory_mapped,
     );
+    descriptor_memory_mapped += uniform_buffer_descriptor_size;
+
+    vkd.getDescriptorEXT(
+        device,
+        &vk.DescriptorGetInfoEXT{
+            .type = .uniform_buffer,
+            .data = .{
+                .p_uniform_buffer = &uniform_buffer_address_info,
+            },
+        },
+        uniform_buffer_descriptor_size,
+        descriptor_memory_mapped,
+    );
+    descriptor_memory_mapped += uniform_buffer_descriptor_size;
+
     vkd.getDescriptorEXT(
         device,
         &vk.DescriptorGetInfoEXT{
@@ -832,10 +909,12 @@ pub fn main() !void {
                 },
             },
         },
-        physical_device_descriptor_buffer_properties.combined_image_sampler_descriptor_size,
-        @ptrCast(descriptor_buffer_mapped + shadow_descriptor_set_layout_size +
-            physical_device_descriptor_buffer_properties.uniform_buffer_descriptor_size),
+        combined_image_sampler_descriptor_size,
+        descriptor_memory_mapped,
     );
+    descriptor_memory_mapped += combined_image_sampler_descriptor_size;
+
+    const start_descriptor_memory_mapped = descriptor_memory_mapped;
 
     const allocator = std.heap.page_allocator;
     var voxels = try allocator.alloc(Voxel, volume_len);
@@ -858,16 +937,13 @@ pub fn main() !void {
     // TODO: fix, more dynamic voxel set modification, and mesh generation
     var surfaces_len = computeSurfacesLen(voxels.ptr);
     const surfaces_len_saturated = surfaces_len * 2;
-    const surface_transfer_buffer_create_info: vk.BufferCreateInfo = .{
-        .flags = .{},
-        .usage = .{
+
+    const surface_transfer_buffer_create_info = bufferCreateInfo(
+        vk.BufferUsageFlags{
             .transfer_src_bit = true,
         },
-        .sharing_mode = .exclusive,
-        .queue_family_index_count = 1,
-        .p_queue_family_indices = &[_]u32{0},
-        .size = @sizeOf(Surface) * surfaces_len_saturated,
-    };
+        @sizeOf(Surface) * surfaces_len_saturated,
+    );
     var surface_transfer_memory_requirements: vk.MemoryRequirements2 = .{
         .memory_requirements = undefined,
     };
@@ -927,17 +1003,13 @@ pub fn main() !void {
         },
     ))));
 
-    var surface_buffer_create_info: vk.BufferCreateInfo = .{
-        .flags = .{},
-        .queue_family_index_count = 1,
-        .p_queue_family_indices = &[_]u32{0},
-        .sharing_mode = .exclusive,
-        .usage = .{
+    const surface_buffer_create_info = bufferCreateInfo(
+        vk.BufferUsageFlags{
             .vertex_buffer_bit = true,
             .transfer_dst_bit = true,
         },
-        .size = surface_transfer_buffer_create_info.size,
-    };
+        surface_transfer_buffer_create_info.size,
+    );
     var surface_memory_requirements: vk.MemoryRequirements2 = .{
         .memory_requirements = undefined,
     };
@@ -1001,6 +1073,21 @@ pub fn main() !void {
         shadow_pipeline_layout,
         null,
     );
+
+    const geometry_pipeline_layout = try vkd.createPipelineLayout(
+        device,
+        &vk.PipelineLayoutCreateInfo{
+            .set_layout_count = 1,
+            .p_set_layouts = @ptrCast(&geometry_descriptor_set_layout),
+        },
+        null,
+    );
+    defer vkd.destroyPipelineLayout(
+        device,
+        geometry_pipeline_layout,
+        null,
+    );
+
     const lighting_pipeline_layout = try vkd.createPipelineLayout(
         device,
         &vk.PipelineLayoutCreateInfo{
@@ -1015,7 +1102,7 @@ pub fn main() !void {
         null,
     );
 
-    var pipelines: [2]vk.Pipeline = undefined;
+    var pipelines: [3]vk.Pipeline = undefined;
     const shaders_spv align(@alignOf(u32)) = @embedFile("shaders").*;
 
     const shader = try vkd.createShaderModule(
@@ -1031,8 +1118,8 @@ pub fn main() !void {
     _ = try vkd.createGraphicsPipelines(
         device,
         .null_handle,
-        2,
-        &[_]vk.GraphicsPipelineCreateInfo{
+        pipelines.len,
+        &[pipelines.len]vk.GraphicsPipelineCreateInfo{
             vk.GraphicsPipelineCreateInfo{
                 .flags = .{
                     .descriptor_buffer_bit_ext = true,
@@ -1044,32 +1131,7 @@ pub fn main() !void {
                     .topology = .triangle_strip,
                     .primitive_restart_enable = vk.FALSE,
                 },
-                .p_color_blend_state = &vk.PipelineColorBlendStateCreateInfo{
-                    .attachment_count = 1,
-                    .blend_constants = [_]f32{
-                        0.0,
-                        0.0,
-                        0.0,
-                        0.0,
-                    },
-                    .logic_op = .copy,
-                    .logic_op_enable = vk.FALSE,
-                    .p_attachments = @ptrCast(&vk.PipelineColorBlendAttachmentState{
-                        .blend_enable = vk.FALSE,
-                        .src_color_blend_factor = .one,
-                        .dst_color_blend_factor = .zero,
-                        .color_blend_op = .add,
-                        .src_alpha_blend_factor = .one,
-                        .dst_alpha_blend_factor = .zero,
-                        .alpha_blend_op = .add,
-                        .color_write_mask = .{
-                            .r_bit = true,
-                            .b_bit = true,
-                            .g_bit = true,
-                            .a_bit = true,
-                        },
-                    }),
-                },
+                .p_color_blend_state = null,
                 .p_depth_stencil_state = &vk.PipelineDepthStencilStateCreateInfo{
                     .depth_bounds_test_enable = vk.TRUE,
                     .flags = .{},
@@ -1118,14 +1180,21 @@ pub fn main() !void {
                 },
                 .p_viewport_state = &vk.PipelineViewportStateCreateInfo{
                     .scissor_count = 1,
-                    .p_scissors = null,
+                    .p_scissors = @ptrCast(&vk.Rect2D{
+                        .extent = shadow_extent,
+                        .offset = offset_zero,
+                    }),
                     .viewport_count = 1,
-                    .p_viewports = null,
+                    .p_viewports = @ptrCast(&vk.Viewport{
+                        .x = 0.0,
+                        .y = 0.0,
+                        .width = @floatFromInt(shadow_side_len),
+                        .height = @floatFromInt(shadow_side_len),
+                        .min_depth = 0.0,
+                        .max_depth = 1.0,
+                    }),
                 },
-                .p_dynamic_state = &vk.PipelineDynamicStateCreateInfo{
-                    .dynamic_state_count = 2,
-                    .p_dynamic_states = @ptrCast(&[_]vk.DynamicState{ .viewport, .scissor }),
-                },
+                .p_dynamic_state = null,
                 .stage_count = 1,
                 .p_stages = &[_]vk.PipelineShaderStageCreateInfo{
                     vk.PipelineShaderStageCreateInfo{
@@ -1150,35 +1219,31 @@ pub fn main() !void {
                 },
                 .base_pipeline_handle = .null_handle,
                 .base_pipeline_index = undefined,
-                .layout = lighting_pipeline_layout,
+                .layout = geometry_pipeline_layout,
                 .p_input_assembly_state = &vk.PipelineInputAssemblyStateCreateInfo{
                     .topology = .triangle_strip,
                     .primitive_restart_enable = vk.FALSE,
                 },
                 .p_color_blend_state = &vk.PipelineColorBlendStateCreateInfo{
                     .attachment_count = 1,
-                    .blend_constants = [_]f32{
-                        0.0,
-                        0.0,
-                        0.0,
-                        0.0,
-                    },
-                    .logic_op = .copy,
+                    .logic_op = undefined,
+                    .blend_constants = undefined,
+                    .flags = .{},
                     .logic_op_enable = vk.FALSE,
                     .p_attachments = @ptrCast(&vk.PipelineColorBlendAttachmentState{
-                        .blend_enable = vk.FALSE,
-                        .src_color_blend_factor = .one,
-                        .dst_color_blend_factor = .zero,
-                        .color_blend_op = .add,
-                        .src_alpha_blend_factor = .one,
-                        .dst_alpha_blend_factor = .zero,
-                        .alpha_blend_op = .add,
                         .color_write_mask = .{
                             .r_bit = true,
-                            .b_bit = true,
                             .g_bit = true,
+                            .b_bit = true,
                             .a_bit = true,
                         },
+                        .blend_enable = vk.FALSE,
+                        .alpha_blend_op = undefined,
+                        .color_blend_op = undefined,
+                        .dst_alpha_blend_factor = undefined,
+                        .dst_color_blend_factor = undefined,
+                        .src_alpha_blend_factor = undefined,
+                        .src_color_blend_factor = undefined,
                     }),
                 },
                 .p_depth_stencil_state = &vk.PipelineDepthStencilStateCreateInfo{
@@ -1235,7 +1300,106 @@ pub fn main() !void {
                 },
                 .p_dynamic_state = &vk.PipelineDynamicStateCreateInfo{
                     .dynamic_state_count = 2,
-                    .p_dynamic_states = @ptrCast(&[_]vk.DynamicState{ .viewport, .scissor }),
+                    .p_dynamic_states = &[_]vk.DynamicState{
+                        .scissor,
+                        .viewport,
+                    },
+                },
+                .stage_count = 2,
+                .p_stages = &[_]vk.PipelineShaderStageCreateInfo{
+                    vk.PipelineShaderStageCreateInfo{
+                        .p_name = "vertexGeometry",
+                        .stage = .{
+                            .vertex_bit = true,
+                        },
+                        .module = shader,
+                    },
+                    vk.PipelineShaderStageCreateInfo{
+                        .p_name = "fragmentGeometry",
+                        .stage = .{
+                            .fragment_bit = true,
+                        },
+                        .module = shader,
+                    },
+                },
+                .render_pass = .null_handle,
+                .subpass = undefined,
+                .p_next = &vk.PipelineRenderingCreateInfo{
+                    .color_attachment_count = 1,
+                    .p_color_attachment_formats = &[_]vk.Format{.r32_uint},
+                    .depth_attachment_format = .d32_sfloat,
+                    .stencil_attachment_format = .undefined,
+                    .view_mask = 0,
+                },
+            },
+            vk.GraphicsPipelineCreateInfo{
+                .flags = .{
+                    .descriptor_buffer_bit_ext = true,
+                },
+                .base_pipeline_handle = .null_handle,
+                .base_pipeline_index = undefined,
+                .layout = lighting_pipeline_layout,
+                .p_input_assembly_state = &vk.PipelineInputAssemblyStateCreateInfo{
+                    .topology = .triangle_list,
+                    .primitive_restart_enable = vk.FALSE,
+                },
+                .p_color_blend_state = &vk.PipelineColorBlendStateCreateInfo{
+                    .attachment_count = 1,
+                    .blend_constants = undefined,
+                    .logic_op = undefined,
+                    .logic_op_enable = undefined,
+                    .p_attachments = @ptrCast(&vk.PipelineColorBlendAttachmentState{
+                        .color_write_mask = .{
+                            .r_bit = true,
+                            .b_bit = true,
+                            .g_bit = true,
+                            .a_bit = false,
+                        },
+                        .blend_enable = undefined,
+                        .src_color_blend_factor = undefined,
+                        .dst_color_blend_factor = undefined,
+                        .color_blend_op = undefined,
+                        .src_alpha_blend_factor = undefined,
+                        .dst_alpha_blend_factor = undefined,
+                        .alpha_blend_op = undefined,
+                    }),
+                },
+                .p_depth_stencil_state = null,
+                .p_vertex_input_state = &vk.PipelineVertexInputStateCreateInfo{
+                    .vertex_attribute_description_count = 0,
+                    .vertex_binding_description_count = 0,
+                },
+                .p_rasterization_state = &vk.PipelineRasterizationStateCreateInfo{
+                    .cull_mode = .{ .back_bit = true },
+                    .front_face = .counter_clockwise,
+                    .polygon_mode = .fill,
+                    .depth_bias_enable = vk.FALSE,
+                    .depth_clamp_enable = vk.FALSE,
+                    .depth_bias_clamp = 0.0,
+                    .depth_bias_constant_factor = 0.0,
+                    .depth_bias_slope_factor = 0.0,
+                    .line_width = 1.0,
+                    .rasterizer_discard_enable = vk.FALSE,
+                },
+                .p_multisample_state = &vk.PipelineMultisampleStateCreateInfo{
+                    .rasterization_samples = .{ .@"1_bit" = true },
+                    .sample_shading_enable = vk.FALSE,
+                    .min_sample_shading = 1,
+                    .alpha_to_coverage_enable = vk.FALSE,
+                    .alpha_to_one_enable = vk.FALSE,
+                },
+                .p_viewport_state = &vk.PipelineViewportStateCreateInfo{
+                    .scissor_count = 1,
+                    .p_scissors = null,
+                    .viewport_count = 1,
+                    .p_viewports = null,
+                },
+                .p_dynamic_state = &vk.PipelineDynamicStateCreateInfo{
+                    .dynamic_state_count = 2,
+                    .p_dynamic_states = @ptrCast(&[_]vk.DynamicState{
+                        .viewport,
+                        .scissor,
+                    }),
                 },
                 .stage_count = 2,
                 .p_stages = &[_]vk.PipelineShaderStageCreateInfo{
@@ -1259,7 +1423,7 @@ pub fn main() !void {
                 .p_next = &vk.PipelineRenderingCreateInfo{
                     .color_attachment_count = 1,
                     .p_color_attachment_formats = @ptrCast(&surface_format.format),
-                    .depth_attachment_format = .d32_sfloat,
+                    .depth_attachment_format = .undefined,
                     .stencil_attachment_format = .undefined,
                     .view_mask = 0,
                 },
@@ -1269,7 +1433,8 @@ pub fn main() !void {
         &pipelines,
     );
     const shadow_pipeline = pipelines[0];
-    const lighting_pipeline = pipelines[1];
+    const geometry_pipeline = pipelines[1];
+    const lighting_pipeline = pipelines[2];
 
     defer for (pipelines) |pipeline| {
         vkd.destroyPipeline(
@@ -1344,13 +1509,12 @@ pub fn main() !void {
     // const random = rand.random();
     var light_angle: f32 = 0.0;
 
-    const side: f32 = (side_len / @sqrt(@as(f32, @floatFromInt(directions)))) - 2.0;
-    uniform.camera.position[0] = side;
-    uniform.camera.position[1] = side;
-    uniform.camera.position[2] = side;
+    const side: f32 = (side_len / @sqrt(@as(f32, @floatFromInt(directions))));
+    uniform_memory_mapped.camera.position = [_]f32{side} ** directions;
 
     var surfaces_regenerate = true;
     var init_shadow = true;
+
     while (true) {
         if (display.roundtrip() != .SUCCESS) return error.RoundtripFailed;
 
@@ -1433,30 +1597,30 @@ pub fn main() !void {
                 }
 
                 if (camera_keyboard.positive[0] and !camera_keyboard.negative[0]) {
-                    uniform.camera.position[2] -= d[0];
-                    uniform.camera.position[0] += d[2];
+                    uniform_memory_mapped.camera.position[2] -= d[0];
+                    uniform_memory_mapped.camera.position[0] += d[2];
                 } else if (!camera_keyboard.positive[0] and camera_keyboard.negative[0]) {
-                    uniform.camera.position[2] += d[0];
-                    uniform.camera.position[0] -= d[2];
+                    uniform_memory_mapped.camera.position[2] += d[0];
+                    uniform_memory_mapped.camera.position[0] -= d[2];
                 }
 
                 if (camera_keyboard.positive[1] and !camera_keyboard.negative[1]) {
-                    uniform.camera.position[1] += d[1];
+                    uniform_memory_mapped.camera.position[1] += d[1];
                 } else if (!camera_keyboard.positive[1] and camera_keyboard.negative[1]) {
-                    uniform.camera.position[1] -= d[1];
+                    uniform_memory_mapped.camera.position[1] -= d[1];
                 }
 
                 if (camera_keyboard.positive[2] and !camera_keyboard.negative[2]) {
-                    uniform.camera.position[2] += d[2];
-                    uniform.camera.position[0] += d[0];
+                    uniform_memory_mapped.camera.position[2] += d[2];
+                    uniform_memory_mapped.camera.position[0] += d[0];
                 } else if (!camera_keyboard.positive[2] and camera_keyboard.negative[2]) {
-                    uniform.camera.position[2] -= d[2];
-                    uniform.camera.position[0] -= d[0];
+                    uniform_memory_mapped.camera.position[2] -= d[2];
+                    uniform_memory_mapped.camera.position[0] -= d[0];
                 }
             }
 
             if (camera_pointer.create != camera_pointer.destroy) {
-                const origin = uniform.camera.position;
+                const origin = uniform_memory_mapped.camera.position;
                 var indices: [directions]usize = undefined;
                 var combined_indices: usize = 0;
 
@@ -1533,27 +1697,27 @@ pub fn main() !void {
 
             var camera_scale: [directions - 1]f32 = undefined;
             camera_scale[0] = 0.2;
-            uniform.camera.near = camera_scale[0] / @tan(zx_half_range);
-            uniform.camera.scale[0] = uniform.camera.near / camera_scale[0];
-            uniform.camera.scale[1] = uniform.camera.scale[0] *
+            uniform_memory_mapped.camera.near = camera_scale[0] / @tan(zx_half_range);
+            uniform_memory_mapped.camera.scale[0] = uniform_memory_mapped.camera.near / camera_scale[0];
+            uniform_memory_mapped.camera.scale[1] = uniform_memory_mapped.camera.scale[0] *
                 @as(f32, @floatFromInt(swapchain_extent.width)) /
                 @as(f32, @floatFromInt(swapchain_extent.height));
 
             for (0..directions - 1) |direction| {
-                uniform.camera.cos[direction] = @cos(angles[direction]);
-                uniform.camera.sin[direction] = @sin(angles[direction]);
+                uniform_memory_mapped.camera.cos[direction] = @cos(angles[direction]);
+                uniform_memory_mapped.camera.sin[direction] = @sin(angles[direction]);
             }
-            uniform.light.direction = light_direction;
+            uniform_memory_mapped.light.direction = light_direction;
 
             camera_scale[1] = camera_scale[0] * @as(f32, @floatFromInt(swapchain_extent.height)) /
                 @as(f32, @floatFromInt(swapchain_extent.width));
 
-            uniform.light.affine = computeLightAffine(
-                uniform.camera.position,
+            uniform_memory_mapped.light.affine = computeLightAffine(
+                uniform_memory_mapped.camera.position,
                 light_direction,
                 angles,
-                uniform.camera.near,
-                uniform.camera.near + 10.0,
+                uniform_memory_mapped.camera.near,
+                uniform_memory_mapped.camera.near + 10.0,
                 camera_scale,
             );
         }
@@ -1593,6 +1757,7 @@ pub fn main() !void {
                             swapchain,
                             null,
                         );
+
                         vkd.destroyImageView(
                             device,
                             depth_image_view,
@@ -1608,102 +1773,185 @@ pub fn main() !void {
                             depth_memory,
                             null,
                         );
+
+                        vkd.destroyImageView(
+                            device,
+                            surface_direction_image_view,
+                            null,
+                        );
+                        vkd.destroyImage(
+                            device,
+                            surface_direction_image,
+                            null,
+                        );
+                        vkd.freeMemory(
+                            device,
+                            surface_direction_memory,
+                            null,
+                        );
                     }
-                    var depth_memory_requirements: vk.MemoryRequirements2 = .{
-                        .memory_requirements = undefined,
-                    };
-                    const depth_image_create_info: vk.ImageCreateInfo = .{
-                        .array_layers = 1,
-                        .extent = .{
-                            .width = swapchain_extent.width,
-                            .height = swapchain_extent.height,
-                            .depth = 1,
-                        },
-                        .format = .d32_sfloat,
-                        .flags = .{},
-                        .image_type = .@"2d",
-                        .initial_layout = .undefined,
-                        .mip_levels = 1,
-                        .usage = .{
-                            .depth_stencil_attachment_bit = true,
-                        },
-                        .queue_family_index_count = 1,
-                        .p_queue_family_indices = &[_]u32{0},
-                        .sharing_mode = .exclusive,
-                        .samples = .{
-                            .@"1_bit" = true,
-                        },
-                        .tiling = .optimal,
-                    };
 
-                    vkd.getDeviceImageMemoryRequirements(
-                        device,
-                        &vk.DeviceImageMemoryRequirements{
-                            .p_create_info = &depth_image_create_info,
-                            .plane_aspect = .{
-                                .depth_bit = true,
+                    descriptor_memory_mapped = start_descriptor_memory_mapped;
+
+                    {
+                        const depth_image_create_info: vk.ImageCreateInfo = imageCreateInfo(
+                            swapchain_extent,
+                            .d32_sfloat,
+                            vk.ImageUsageFlags{
+                                .sampled_bit = true,
+                                .depth_stencil_attachment_bit = true,
                             },
-                        },
-                        &depth_memory_requirements,
-                    );
-
-                    depth_memory = try vkd.allocateMemory(
-                        device,
-                        &vk.MemoryAllocateInfo{
-                            .allocation_size = depth_memory_requirements.memory_requirements.size,
-                            .memory_type_index = try findMemoryTypeIndex(
-                                depth_memory_requirements.memory_requirements.memory_type_bits,
-                                vk.MemoryPropertyFlags{
-                                    .device_local_bit = true,
+                        );
+                        var depth_memory_requirements: vk.MemoryRequirements2 = .{
+                            .memory_requirements = undefined,
+                        };
+                        _ = vkd.getDeviceImageMemoryRequirements(
+                            device,
+                            &vk.DeviceImageMemoryRequirements{
+                                .p_create_info = &depth_image_create_info,
+                                .plane_aspect = .{
+                                    .depth_bit = true,
                                 },
-                                physical_device_memory_properties,
-                            ),
-                        },
-                        null,
-                    );
-
-                    depth_image = try vkd.createImage(
-                        device,
-                        &depth_image_create_info,
-                        null,
-                    );
-                    _ = try vkd.bindImageMemory2(
-                        device,
-                        1,
-                        &[_]vk.BindImageMemoryInfo{
-                            vk.BindImageMemoryInfo{
+                            },
+                            &depth_memory_requirements,
+                        );
+                        depth_memory = try vkd.allocateMemory(
+                            device,
+                            &vk.MemoryAllocateInfo{
+                                .allocation_size = depth_memory_requirements.memory_requirements.size,
+                                .memory_type_index = try findMemoryTypeIndex(
+                                    depth_memory_requirements.memory_requirements.memory_type_bits,
+                                    vk.MemoryPropertyFlags{
+                                        .device_local_bit = true,
+                                    },
+                                    physical_device_memory_properties,
+                                ),
+                            },
+                            null,
+                        );
+                        depth_image = try vkd.createImage(
+                            device,
+                            &depth_image_create_info,
+                            null,
+                        );
+                        _ = try vkd.bindImageMemory2(
+                            device,
+                            1,
+                            @ptrCast(&vk.BindImageMemoryInfo{
                                 .image = depth_image,
                                 .memory = depth_memory,
                                 .memory_offset = 0,
-                            },
-                        },
-                    );
-
-                    depth_image_view = try vkd.createImageView(
-                        device,
-                        &vk.ImageViewCreateInfo{
-                            .components = .{
-                                .r = .identity,
-                                .b = .identity,
-                                .g = .identity,
-                                .a = .identity,
-                            },
-                            .flags = .{},
-                            .format = depth_image_create_info.format,
-                            .image = depth_image,
-                            .view_type = .@"2d",
-                            .subresource_range = .{
-                                .aspect_mask = .{
+                            }),
+                        );
+                        depth_image_view = try vkd.createImageView(
+                            device,
+                            &imageViewCreateInfo(
+                                depth_image,
+                                .d32_sfloat,
+                                .{
                                     .depth_bit = true,
                                 },
-                                .base_array_layer = 0,
-                                .base_mip_level = 0,
-                                .layer_count = 1,
-                                .level_count = 1,
+                            ),
+                            null,
+                        );
+
+                        vkd.getDescriptorEXT(
+                            device,
+                            &vk.DescriptorGetInfoEXT{
+                                .type = .combined_image_sampler,
+                                .data = .{
+                                    .p_combined_image_sampler = &vk.DescriptorImageInfo{
+                                        .image_layout = .depth_read_only_optimal,
+                                        .image_view = depth_image_view,
+                                        .sampler = geometry_sampler,
+                                    },
+                                },
                             },
-                        },
-                        null,
-                    );
+                            combined_image_sampler_descriptor_size,
+                            descriptor_memory_mapped,
+                        );
+                        descriptor_memory_mapped += combined_image_sampler_descriptor_size;
+                    }
+
+                    {
+                        const surface_direction_image_create_info: vk.ImageCreateInfo = imageCreateInfo(
+                            swapchain_extent,
+                            .r32_uint,
+                            vk.ImageUsageFlags{
+                                .sampled_bit = true,
+                                .color_attachment_bit = true,
+                            },
+                        );
+                        var surface_direction_memory_requirements: vk.MemoryRequirements2 = .{
+                            .memory_requirements = undefined,
+                        };
+                        _ = vkd.getDeviceImageMemoryRequirements(
+                            device,
+                            &vk.DeviceImageMemoryRequirements{
+                                .p_create_info = &surface_direction_image_create_info,
+                                .plane_aspect = .{
+                                    .depth_bit = true,
+                                },
+                            },
+                            &surface_direction_memory_requirements,
+                        );
+                        surface_direction_memory = try vkd.allocateMemory(
+                            device,
+                            &vk.MemoryAllocateInfo{
+                                .allocation_size = surface_direction_memory_requirements.memory_requirements.size,
+                                .memory_type_index = try findMemoryTypeIndex(
+                                    surface_direction_memory_requirements.memory_requirements.memory_type_bits,
+                                    vk.MemoryPropertyFlags{
+                                        .device_local_bit = true,
+                                    },
+                                    physical_device_memory_properties,
+                                ),
+                            },
+                            null,
+                        );
+                        surface_direction_image = try vkd.createImage(
+                            device,
+                            &surface_direction_image_create_info,
+                            null,
+                        );
+                        _ = try vkd.bindImageMemory2(
+                            device,
+                            1,
+                            @ptrCast(&vk.BindImageMemoryInfo{
+                                .image = surface_direction_image,
+                                .memory = surface_direction_memory,
+                                .memory_offset = 0,
+                            }),
+                        );
+                        surface_direction_image_view = try vkd.createImageView(
+                            device,
+                            &imageViewCreateInfo(
+                                surface_direction_image,
+                                .r32_uint,
+                                .{
+                                    .color_bit = true,
+                                },
+                            ),
+                            null,
+                        );
+
+                        vkd.getDescriptorEXT(
+                            device,
+                            &vk.DescriptorGetInfoEXT{
+                                .type = .combined_image_sampler,
+                                .data = .{
+                                    .p_combined_image_sampler = &vk.DescriptorImageInfo{
+                                        .image_layout = .read_only_optimal,
+                                        .image_view = surface_direction_image_view,
+                                        .sampler = geometry_sampler,
+                                    },
+                                },
+                            },
+                            combined_image_sampler_descriptor_size,
+                            descriptor_memory_mapped,
+                        );
+                        descriptor_memory_mapped += combined_image_sampler_descriptor_size;
+                    }
 
                     init_swapchain = true;
 
@@ -1737,26 +1985,9 @@ pub fn main() !void {
                     for (0..swapchain_images_count) |i| {
                         swapchain_image_views[i] = try vkd.createImageView(
                             device,
-                            &.{
-                                .image = swapchain_images[i],
-                                .components = .{
-                                    .a = .identity,
-                                    .r = .identity,
-                                    .g = .identity,
-                                    .b = .identity,
-                                },
-                                .subresource_range = .{
-                                    .aspect_mask = .{
-                                        .color_bit = true,
-                                    },
-                                    .base_mip_level = 0,
-                                    .level_count = 1,
-                                    .base_array_layer = 0,
-                                    .layer_count = 1,
-                                },
-                                .format = surface_format.format,
-                                .view_type = .@"2d",
-                            },
+                            &imageViewCreateInfo(swapchain_images[i], surface_format.format, .{
+                                .color_bit = true,
+                            }),
                             null,
                         );
                         if (render_end_semaphores[i] == .null_handle) {
@@ -1902,14 +2133,8 @@ pub fn main() !void {
                     .color_attachment_count = 0,
                     .view_mask = 0,
                     .render_area = .{
-                        .offset = .{
-                            .x = 0,
-                            .y = 0,
-                        },
-                        .extent = .{
-                            .width = shadow_side_len,
-                            .height = shadow_side_len,
-                        },
+                        .offset = offset_zero,
+                        .extent = shadow_extent,
                     },
                     .flags = .{},
                     .layer_count = 1,
@@ -1928,25 +2153,6 @@ pub fn main() !void {
                         .resolve_image_layout = .undefined,
                     },
                 });
-                vkd.cmdSetViewport(command_buffers[frame], 0, 1, @ptrCast(&vk.Viewport{
-                    .x = 0.0,
-                    .y = 0.0,
-                    .width = @floatFromInt(shadow_side_len),
-                    .height = @floatFromInt(shadow_side_len),
-                    .min_depth = 0.0,
-                    .max_depth = 1.0,
-                }));
-
-                vkd.cmdSetScissor(command_buffers[frame], 0, 1, @ptrCast(&vk.Rect2D{
-                    .extent = .{
-                        .width = shadow_side_len,
-                        .height = shadow_side_len,
-                    },
-                    .offset = .{
-                        .x = 0,
-                        .y = 0,
-                    },
-                }));
 
                 vkd.cmdBindPipeline(
                     command_buffers[frame],
@@ -1983,6 +2189,160 @@ pub fn main() !void {
                 vkd.cmdEndRendering(command_buffers[frame]);
             }
 
+            var depth_image_memory_barrier = image_memory_barrier;
+            depth_image_memory_barrier.image = depth_image;
+            depth_image_memory_barrier.subresource_range.aspect_mask.depth_bit = true;
+
+            depth_image_memory_barrier.src_stage_mask = .{
+                .fragment_shader_bit = true,
+            };
+            depth_image_memory_barrier.src_access_mask = .{
+                .depth_stencil_attachment_read_bit = true,
+            };
+            depth_image_memory_barrier.old_layout =
+                if (init_swapchain)
+                    vk.ImageLayout.undefined
+                else
+                    vk.ImageLayout.depth_read_only_optimal;
+
+            depth_image_memory_barrier.new_layout = .depth_attachment_optimal;
+            depth_image_memory_barrier.dst_stage_mask = .{
+                .early_fragment_tests_bit = true,
+                .late_fragment_tests_bit = true,
+            };
+            depth_image_memory_barrier.dst_access_mask = .{
+                .depth_stencil_attachment_write_bit = true,
+            };
+
+            var surface_direction_image_memory_barrier = image_memory_barrier;
+            surface_direction_image_memory_barrier.image = surface_direction_image;
+            surface_direction_image_memory_barrier.subresource_range.aspect_mask.color_bit = true;
+
+            surface_direction_image_memory_barrier.src_stage_mask = .{
+                .fragment_shader_bit = true,
+            };
+            surface_direction_image_memory_barrier.src_access_mask = .{
+                .color_attachment_read_bit = true,
+            };
+            surface_direction_image_memory_barrier.old_layout =
+                if (init_swapchain)
+                    vk.ImageLayout.undefined
+                else
+                    vk.ImageLayout.color_attachment_optimal;
+
+            surface_direction_image_memory_barrier.new_layout = .color_attachment_optimal;
+            surface_direction_image_memory_barrier.dst_stage_mask = .{
+                .color_attachment_output_bit = true,
+            };
+            surface_direction_image_memory_barrier.dst_access_mask = .{
+                .color_attachment_write_bit = true,
+            };
+
+            {
+                const image_memory_barriers = [_]vk.ImageMemoryBarrier2{
+                    depth_image_memory_barrier,
+                    surface_direction_image_memory_barrier,
+                };
+                vkd.cmdPipelineBarrier2(command_buffers[frame], &vk.DependencyInfo{
+                    .image_memory_barrier_count = image_memory_barriers.len,
+                    .p_image_memory_barriers = &image_memory_barriers,
+                });
+            }
+
+            // geometry pass
+            {
+                vkd.cmdBeginRendering(command_buffers[frame], &vk.RenderingInfo{
+                    .color_attachment_count = 1,
+                    .view_mask = 0,
+                    .render_area = .{
+                        .offset = offset_zero,
+                        .extent = swapchain_extent,
+                    },
+                    .flags = .{},
+                    .layer_count = 1,
+                    .p_depth_attachment = &vk.RenderingAttachmentInfo{
+                        .clear_value = .{
+                            .depth_stencil = .{
+                                .depth = 0.0,
+                                .stencil = undefined,
+                            },
+                        },
+                        .image_layout = .depth_attachment_optimal,
+                        .image_view = depth_image_view,
+                        .load_op = .clear,
+                        .store_op = .store,
+                        .resolve_mode = .{},
+                        .resolve_image_layout = .undefined,
+                    },
+                    .p_color_attachments = @ptrCast(&vk.RenderingAttachmentInfo{
+                        .clear_value = .{
+                            .color = .{
+                                .uint_32 = [_]u32{
+                                    0,
+                                    0,
+                                    0,
+                                    0,
+                                },
+                            },
+                        },
+                        .image_layout = .color_attachment_optimal,
+                        .image_view = surface_direction_image_view,
+                        .load_op = .clear,
+                        .store_op = .store,
+                        .resolve_mode = .{},
+                        .resolve_image_layout = .undefined,
+                    }),
+                });
+
+                vkd.cmdSetViewport(command_buffers[frame], 0, 1, @ptrCast(&vk.Viewport{
+                    .x = 0.0,
+                    .y = 0.0,
+                    .width = @floatFromInt(swapchain_extent.width),
+                    .height = @floatFromInt(swapchain_extent.height),
+                    .min_depth = 0.0,
+                    .max_depth = 1.0,
+                }));
+
+                vkd.cmdSetScissor(command_buffers[frame], 0, 1, @ptrCast(&vk.Rect2D{
+                    .extent = swapchain_extent,
+                    .offset = offset_zero,
+                }));
+
+                vkd.cmdBindPipeline(
+                    command_buffers[frame],
+                    .graphics,
+                    geometry_pipeline,
+                );
+
+                vkd.cmdBindDescriptorBuffersEXT(
+                    command_buffers[frame],
+                    1,
+                    @ptrCast(&descriptor_buffer_binding_info),
+                );
+                descriptor_buffer_binding_info.address += geometry_descriptor_set_layout_size;
+
+                descriptor_buffer_offsets_info.layout = geometry_pipeline_layout;
+                descriptor_buffer_offsets_info.stage_flags = .{
+                    .vertex_bit = true,
+                };
+                vkd.cmdSetDescriptorBufferOffsets2EXT(
+                    command_buffers[frame],
+                    &descriptor_buffer_offsets_info,
+                );
+
+                vkd.cmdBindVertexBuffers(
+                    command_buffers[frame],
+                    0,
+                    1,
+                    @ptrCast(&surface_buffer),
+                    @ptrCast(&@as(vk.DeviceSize, 0)),
+                );
+
+                vkd.cmdDraw(command_buffers[frame], 4, surfaces_len, 0, 0);
+
+                vkd.cmdEndRendering(command_buffers[frame]);
+            }
+
             advanceImageBarrier(&shadow_image_memory_barrier);
             shadow_image_memory_barrier.new_layout = .depth_read_only_optimal;
             shadow_image_memory_barrier.dst_stage_mask = .{
@@ -1992,30 +2352,22 @@ pub fn main() !void {
                 .depth_stencil_attachment_read_bit = true,
             };
 
-            var depth_image_memory_barrier = image_memory_barrier;
-            depth_image_memory_barrier.image = depth_image;
-            depth_image_memory_barrier.subresource_range.aspect_mask.depth_bit = true;
-
-            depth_image_memory_barrier.src_stage_mask = .{
-                .early_fragment_tests_bit = true,
-                .late_fragment_tests_bit = true,
-            };
-            depth_image_memory_barrier.src_access_mask = .{
-                .depth_stencil_attachment_write_bit = true,
-            };
-            depth_image_memory_barrier.old_layout =
-                if (init_swapchain)
-                    vk.ImageLayout.undefined
-                else
-                    vk.ImageLayout.depth_attachment_optimal;
-
-            depth_image_memory_barrier.new_layout = .depth_attachment_optimal;
+            advanceImageBarrier(&depth_image_memory_barrier);
+            depth_image_memory_barrier.new_layout = .depth_read_only_optimal;
             depth_image_memory_barrier.dst_stage_mask = .{
-                .early_fragment_tests_bit = true,
-                .late_fragment_tests_bit = true,
+                .fragment_shader_bit = true,
             };
             depth_image_memory_barrier.dst_access_mask = .{
-                .depth_stencil_attachment_write_bit = true,
+                .depth_stencil_attachment_read_bit = true,
+            };
+
+            advanceImageBarrier(&surface_direction_image_memory_barrier);
+            depth_image_memory_barrier.new_layout = .read_only_optimal;
+            depth_image_memory_barrier.dst_stage_mask = .{
+                .fragment_shader_bit = true,
+            };
+            depth_image_memory_barrier.dst_access_mask = .{
+                .color_attachment_read_bit = true,
             };
 
             var swapchain_image_memory_barrier = image_memory_barrier;
@@ -2040,6 +2392,7 @@ pub fn main() !void {
                 const image_memory_barriers = [_]vk.ImageMemoryBarrier2{
                     shadow_image_memory_barrier,
                     depth_image_memory_barrier,
+                    surface_direction_image_memory_barrier,
                     swapchain_image_memory_barrier,
                 };
 
@@ -2048,14 +2401,12 @@ pub fn main() !void {
                     .p_image_memory_barriers = &image_memory_barriers,
                 });
             }
+
             {
                 vkd.cmdBeginRendering(command_buffers[frame], &vk.RenderingInfo{
                     .view_mask = 0,
                     .render_area = .{
-                        .offset = .{
-                            .x = 0,
-                            .y = 0,
-                        },
+                        .offset = offset_zero,
                         .extent = swapchain_extent,
                     },
                     .layer_count = 1,
@@ -2078,20 +2429,6 @@ pub fn main() !void {
                         .store_op = .store,
                         .resolve_image_layout = .undefined,
                     }),
-                    .p_depth_attachment = &vk.RenderingAttachmentInfo{
-                        .image_view = depth_image_view,
-                        .clear_value = vk.ClearValue{
-                            .depth_stencil = .{
-                                .depth = 0.0,
-                                .stencil = 0,
-                            },
-                        },
-                        .image_layout = .depth_attachment_optimal,
-                        .resolve_mode = .{},
-                        .load_op = .clear,
-                        .store_op = .store,
-                        .resolve_image_layout = .undefined,
-                    },
                 });
 
                 vkd.cmdSetViewport(command_buffers[frame], 0, 1, @ptrCast(&vk.Viewport{
@@ -2105,13 +2442,14 @@ pub fn main() !void {
 
                 vkd.cmdSetScissor(command_buffers[frame], 0, 1, @ptrCast(&vk.Rect2D{
                     .extent = swapchain_extent,
-                    .offset = .{
-                        .x = 0,
-                        .y = 0,
-                    },
+                    .offset = offset_zero,
                 }));
 
-                vkd.cmdBindPipeline(command_buffers[frame], .graphics, lighting_pipeline);
+                vkd.cmdBindPipeline(
+                    command_buffers[frame],
+                    .graphics,
+                    lighting_pipeline,
+                );
 
                 vkd.cmdBindDescriptorBuffersEXT(
                     command_buffers[frame],
@@ -2130,15 +2468,7 @@ pub fn main() !void {
                     &descriptor_buffer_offsets_info,
                 );
 
-                vkd.cmdBindVertexBuffers(
-                    command_buffers[frame],
-                    0,
-                    1,
-                    @ptrCast(&surface_buffer),
-                    @ptrCast(&@as(vk.DeviceSize, 0)),
-                );
-
-                vkd.cmdDraw(command_buffers[frame], 4, surfaces_len, 0, 0);
+                vkd.cmdDraw(command_buffers[frame], 3, 1, 0, 0);
 
                 vkd.cmdEndRendering(command_buffers[frame]);
             }
@@ -2467,40 +2797,34 @@ fn generateSurfaces(voxels: [*]const Voxel, surfaces: [*]Surface) void {
             const cleaned_voxel_i = voxel_i & ~mask;
 
             {
-                var surface = Surface{
+                const surface = Surface{
                     .direction_sign = 0,
                     .direction = direction,
                     .combined_indices = combined_indices,
-                    .surrounding_air = undefined,
                 };
                 if (coord == 0) {
-                    surface.surrounding_air = (directions << 1) - 1;
                     surfaces[surface_i] = surface;
                     surface_i += 1;
                 } else {
                     const air_voxel_i = cleaned_voxel_i | pdep(usize, coord - 1, mask);
                     if (voxels[air_voxel_i] == Voxel.Air) {
-                        surface.surrounding_air = computeSurroundingAir(voxels, air_voxel_i);
                         surfaces[surface_i] = surface;
                         surface_i += 1;
                     }
                 }
             }
             {
-                var surface = Surface{
+                const surface = Surface{
                     .direction_sign = 1,
                     .direction = direction,
                     .combined_indices = combined_indices,
-                    .surrounding_air = undefined,
                 };
                 if (coord == side_len - 1) {
-                    surface.surrounding_air = (directions << 1) - 1;
                     surfaces[surface_i] = surface;
                     surface_i += 1;
                 } else {
                     const air_voxel_i = cleaned_voxel_i | pdep(usize, coord + 1, mask);
                     if (voxels[air_voxel_i] == Voxel.Air) {
-                        surface.surrounding_air = computeSurroundingAir(voxels, air_voxel_i);
                         surfaces[surface_i] = surface;
                         surface_i += 1;
                     }
@@ -2508,33 +2832,6 @@ fn generateSurfaces(voxels: [*]const Voxel, surfaces: [*]Surface) void {
             }
         }
     }
-}
-
-fn computeSurroundingAir(voxels: [*]const Voxel, voxel_i: usize) SurroundingAir {
-    var surrounding_air: SurroundingAir = 0;
-    for (0..directions) |_dimenion_i| {
-        const direction_i: Direction = @truncate(_dimenion_i);
-        const mask = morton_mask << direction_i;
-        const coord = pext(usize, voxel_i, mask);
-        const cleaned_voxel_i = voxel_i & ~mask;
-
-        // virtual air voxel at boundaries
-        if (coord == 0 or
-            voxels[cleaned_voxel_i | pdep(usize, coord - 1, mask)] == Voxel.Air)
-        {
-            surrounding_air += 1;
-        }
-        if (coord == side_len - 1 or
-            voxels[cleaned_voxel_i | pdep(usize, coord + 1, mask)] == Voxel.Air)
-        {
-            surrounding_air += 1;
-        }
-    }
-    if (surrounding_air >= directions << 1) {
-        @panic("wtf");
-    }
-
-    return surrounding_air;
 }
 
 fn computeLightAffine(
@@ -2766,3 +3063,64 @@ fn advanceImageBarrier(barrier: *vk.ImageMemoryBarrier2) void {
 //         return len;
 //     }
 // }
+const offset_zero: vk.Offset2D = .{
+    .x = 0,
+    .y = 0,
+};
+
+fn imageCreateInfo(extent: vk.Extent2D, format: vk.Format, usage: vk.ImageUsageFlags) vk.ImageCreateInfo {
+    return vk.ImageCreateInfo{
+        .format = format,
+        .usage = usage,
+        .array_layers = 1,
+        .extent = .{
+            .width = extent.width,
+            .height = extent.height,
+            .depth = 1,
+        },
+        .flags = .{},
+        .image_type = .@"2d",
+        .initial_layout = .undefined,
+        .mip_levels = 1,
+        .queue_family_index_count = 1,
+        .p_queue_family_indices = &[_]u32{0},
+        .samples = .{
+            .@"1_bit" = true,
+        },
+        .tiling = .optimal,
+        .sharing_mode = .exclusive,
+    };
+}
+
+fn imageViewCreateInfo(image: vk.Image, format: vk.Format, aspect_mask: vk.ImageAspectFlags) vk.ImageViewCreateInfo {
+    return vk.ImageViewCreateInfo{
+        .format = format,
+        .image = image,
+        .components = .{
+            .a = .identity,
+            .b = .identity,
+            .g = .identity,
+            .r = .identity,
+        },
+        .flags = .{},
+        .view_type = .@"2d",
+        .subresource_range = .{
+            .aspect_mask = aspect_mask,
+            .base_array_layer = 0,
+            .base_mip_level = 0,
+            .layer_count = 1,
+            .level_count = 1,
+        },
+    };
+}
+
+fn bufferCreateInfo(usage: vk.BufferUsageFlags, size: vk.DeviceSize) vk.BufferCreateInfo {
+    return vk.BufferCreateInfo{
+        .usage = usage,
+        .size = size,
+        .flags = .{},
+        .sharing_mode = .exclusive,
+        .queue_family_index_count = 1,
+        .p_queue_family_indices = &[_]u32{0},
+    };
+}
