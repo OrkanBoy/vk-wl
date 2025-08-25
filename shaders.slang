@@ -15,6 +15,11 @@ struct Uniform {
   float2 camera_sin;
   float2 camera_scale;
 }
+enum Voxel {
+  Air,
+  Stone,
+};
+
 
 vector<T, N> applyAffine<T : __BuiltinFloatingPointType, let N : int>(
     vector<T, N> input, vector<T, N + 1> affine[N], ) {
@@ -28,13 +33,13 @@ vector<T, N> applyAffine<T : __BuiltinFloatingPointType, let N : int>(
   return output;
 }
 
-static const uint log_side_len = 0x5;
+static const uint log_side_len = 0x4;
 
 static const uint directions = 3;
 static const uint log_directions = uint(ceil(log2(float(directions))));
 
 namespace shadow {
-[vk_binding(0,0)] 
+[vk_binding(0)] 
 ConstantBuffer<Uniform> uniform;
 
 struct VSOutput {
@@ -83,28 +88,33 @@ VSOutput vertexShadow(VSInput input, uint vertex_id: SV_VertexID) {
 }
 }
 
-
 namespace geometry {
-[vk_binding(0,0)]
+[vk_binding(0)]
 ConstantBuffer<Uniform> uniform;
+[vk_binding(1)]
+StructuredBuffer<Voxel> voxels;
 
 struct VSOutput {
   float4 clip_position: SV_Position;
-  uint32_t surface_direction_signed;
+  nointerpolation uint surface_direction_signed;
+  float ambient;
 };
 
 
 [shader("vertex")]
 VSOutput vertexGeometry(VSInput input, uint vertex_id: SV_VertexID) {
-  VSOutput output;
+  var output: VSOutput;
 
-  float3 position;
+  var position: float3;
+  // var combined_indices = 0;
 
   var surface = input.surface;
-  for (uint _direction = 0; _direction != directions; _direction += 1) {
-    uint direction = directions - _direction - 1;
-    position[direction] =
-        float(surface & ((1 << log_side_len) - 1));
+  for (var _direction = 0; _direction != directions; _direction += 1) {
+    let direction = directions - _direction - 1;
+    let index = surface & ((1 << log_side_len) - 1);
+    position[direction] = float(index);
+    // combined_indices |= morton(index);
+    // combined_indices <<= 1;
     surface >>= log_side_len;
   }
   output.surface_direction_signed = surface & ((1 << (log_directions + 1)) - 1);
@@ -151,12 +161,15 @@ VSOutput vertexGeometry(VSInput input, uint vertex_id: SV_VertexID) {
     uniform.camera_near,
     position[2],
   };
+
+  output.ambient = vertex_id / 3.0;
+
   return output;
 }
 
 [shader("fragment")]
-uint fragmentGeometry(VSOutput input) {
-  return input.surface_direction_signed;
+uint2 fragmentGeometry(VSOutput input) {
+  return uint2(input.surface_direction_signed, bit_cast<uint>(input.ambient));
 }
 }
 
@@ -179,14 +192,14 @@ VSOutput vertexLighting(uint vertex_id: SV_VertexID) {
   return output;
 }
 
-[vk_binding(0,0)]
+[vk_binding(0)]
 ConstantBuffer<Uniform> uniform;
-[vk_binding(1,0)]
+[vk_binding(1)]
 Sampler2DShadow shadow_sampler;
-[vk_binding(2,0)]
-Sampler2DShadow depth_sampler;
-[vk_binding(3,0)]
-Sampler2D<uint> surface_direction_sampler;
+[vk_binding(2)]
+Sampler2D<float> depth_sampler;
+[vk_binding(3)]
+Sampler2D<uint2> geometry_sampler;
 
 [shader("fragment")]
 float3 fragmentLighting(VSOutput input) {
@@ -195,9 +208,44 @@ float3 fragmentLighting(VSOutput input) {
     return {0.0, 0.0, 0.0};
   }
 
+  float3 position;
+  position[directions - 1] = uniform.camera_near / depth;
+
+  for (var direction = 0; direction != directions - 1; direction += 1) {
+    position[direction] = input.sample_position[direction] * 2.0 - 1.0;
+    position[direction] *= position[directions - 1];
+    position[direction] /= uniform.camera_scale[direction];
+  }
+
+  position[directions - 1] -= uniform.camera_near;
+
+  for (var _direction = 1; _direction != directions; _direction += 1) {
+    let direction = directions - _direction - 1;
+    let adj = position[directions - 1];
+    let opp = position[direction];
+
+    position[directions - 1] = 
+      uniform.camera_cos[direction] * adj - 
+      uniform.camera_sin[direction] * opp;
+    position[direction] =
+      uniform.camera_sin[direction] * adj +
+      uniform.camera_cos[direction] * opp;
+  }
+
+  position += uniform.camera_position;
+
+  let light_view_position = applyAffine(position, uniform.light_affine);
+  let light_view_sample_position = light_view_position.xy / 2.0 + 0.5;
+
+  let light = shadow_sampler.SampleCmp(
+    light_view_sample_position, 
+    light_view_position.z,
+  );
+
+
   float3 output; 
 
-  var direction_signed = surface_direction_sampler.Sample(input.sample_position);
+  var direction_signed = geometry_sampler.Sample(input.sample_position)[0];
   let direction_unsigned = direction_signed & ((1 << log_directions) - 1);
   direction_signed >>= log_directions;
   let direction_sign = direction_signed & 1;
@@ -205,8 +253,22 @@ float3 fragmentLighting(VSOutput input) {
   for (var direction = 0; direction != directions; direction += 1) {
     output[direction] = float(direction_sign ^ (direction != direction_unsigned));
   }
-  
-  return output;
+  output *= light;
+
+  return output * bit_cast<float>(geometry_sampler.Sample(input.sample_position)[1]);
 }
 
+}
+
+uint morton(uint x) {
+  {
+    const uint mask = 0b000000000011;
+    x = (x & mask) | ((x & (mask << 0b10)) << ((directions - 1) << 0b1));
+  }
+  {
+    const uint mask = 0b000001000001;
+    x = (x & mask) | ((x & (mask << 0b1)) << ((directions - 1)));
+  }
+
+  return x;
 }
