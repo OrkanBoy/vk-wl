@@ -55,7 +55,7 @@ const morton_mask: CombinedIndices = _: {
     break :_ value;
 };
 
-const Voxel = enum {
+const Voxel = enum(u8) {
     Air,
     Stone,
 };
@@ -330,6 +330,7 @@ pub fn main() !void {
         .vulkan_memory_model = vk.TRUE,
         .vulkan_memory_model_availability_visibility_chains = vk.TRUE,
         .shader_int_8 = vk.TRUE,
+        .uniform_and_storage_buffer_8_bit_access = vk.TRUE,
         .p_next = @ptrCast(&features_1_3),
     };
     var features_1_1: vk.PhysicalDeviceVulkan11Features = .{
@@ -436,6 +437,133 @@ pub fn main() !void {
         device,
         geometry_image_view,
         null,
+    );
+
+    const voxel_transfer_buffer_create_info = bufferCreateInfo(
+        vk.BufferUsageFlags{
+            .transfer_src_bit = true,
+        },
+        @sizeOf(Voxel) * volume_len,
+    );
+    var voxel_transfer_memory_requirements = vk.MemoryRequirements2{
+        .memory_requirements = undefined,
+    };
+    vkd.getDeviceBufferMemoryRequirements(
+        device,
+        &vk.DeviceBufferMemoryRequirements{
+            .p_create_info = &voxel_transfer_buffer_create_info,
+        },
+        &voxel_transfer_memory_requirements,
+    );
+    const voxel_transfer_memory = try vkd.allocateMemory(
+        device,
+        &vk.MemoryAllocateInfo{
+            .allocation_size = voxel_transfer_memory_requirements.memory_requirements.size,
+            .memory_type_index = try findMemoryTypeIndex(
+                voxel_transfer_memory_requirements.memory_requirements.memory_type_bits,
+                vk.MemoryPropertyFlags{
+                    .host_coherent_bit = true,
+                    .host_visible_bit = true,
+                },
+                physical_device_memory_properties,
+            ),
+        },
+        null,
+    );
+    defer vkd.freeMemory(
+        device,
+        voxel_transfer_memory,
+        null,
+    );
+    const voxel_transfer_buffer = try vkd.createBuffer(
+        device,
+        &voxel_transfer_buffer_create_info,
+        null,
+    );
+    defer vkd.destroyBuffer(
+        device,
+        voxel_transfer_buffer,
+        null,
+    );
+    _ = try vkd.bindBufferMemory2(
+        device,
+        1,
+        @ptrCast(&vk.BindBufferMemoryInfo{
+            .buffer = voxel_transfer_buffer,
+            .memory = voxel_transfer_memory,
+            .memory_offset = 0,
+        }),
+    );
+    const voxels: [*]Voxel = @ptrCast(@alignCast(try vkd.mapMemory2(
+        device,
+        &vk.MemoryMapInfo{
+            .memory = voxel_transfer_memory,
+            .offset = 0,
+            .size = voxel_transfer_buffer_create_info.size,
+        },
+    )));
+
+    const voxel_buffer_create_info = bufferCreateInfo(
+        vk.BufferUsageFlags{
+            .transfer_dst_bit = true,
+            .storage_buffer_bit = true,
+            .shader_device_address_bit = true,
+        },
+        @sizeOf(Voxel) * volume_len,
+    );
+    var voxel_memory_requirements = vk.MemoryRequirements2{
+        .memory_requirements = undefined,
+    };
+    vkd.getDeviceBufferMemoryRequirements(
+        device,
+        &vk.DeviceBufferMemoryRequirements{
+            .p_create_info = &voxel_buffer_create_info,
+        },
+        &voxel_memory_requirements,
+    );
+    const voxel_memory = try vkd.allocateMemory(
+        device,
+        &vk.MemoryAllocateInfo{
+            .allocation_size = voxel_memory_requirements.memory_requirements.size,
+            .memory_type_index = try findMemoryTypeIndex(
+                voxel_memory_requirements.memory_requirements.memory_type_bits,
+                vk.MemoryPropertyFlags{
+                    .device_local_bit = true,
+                },
+                physical_device_memory_properties,
+            ),
+            .p_next = &vk.MemoryAllocateFlagsInfo{
+                .flags = .{
+                    .device_address_bit = true,
+                },
+                .device_mask = 0,
+            },
+        },
+        null,
+    );
+    defer vkd.freeMemory(
+        device,
+        voxel_memory,
+        null,
+    );
+    const voxel_buffer = try vkd.createBuffer(
+        device,
+        &voxel_buffer_create_info,
+        null,
+    );
+    defer vkd.destroyBuffer(
+        device,
+        voxel_buffer,
+        null,
+    );
+    _ = try vkd.bindBufferMemory2(
+        device,
+        1,
+        @ptrCast(&vk.BindBufferMemoryInfo{
+            .buffer = voxel_buffer,
+            .memory = voxel_memory,
+            .memory_offset = 0,
+        }),
     );
 
     var uniform_memory_requirements: vk.MemoryRequirements2 = .{
@@ -637,7 +765,7 @@ pub fn main() !void {
         null,
     );
 
-    const uniform_memory_mapped: *Uniform = @ptrCast(@alignCast(try vkd.mapMemory2(device, &vk.MemoryMapInfo{
+    const uniform: *Uniform = @ptrCast(@alignCast(try vkd.mapMemory2(device, &vk.MemoryMapInfo{
         .flags = .{},
         .memory = uniform_memory,
         .offset = 0,
@@ -663,14 +791,14 @@ pub fn main() !void {
                 .vertex_bit = true,
             },
         },
-        // vk.DescriptorSetLayoutBinding{
-        //     .binding = 1,
-        //     .descriptor_count = 1,
-        //     .descriptor_type = .storage_buffer,
-        //     .stage_flags = .{
-        //         .vertex_bit = true,
-        //     },
-        // },
+        vk.DescriptorSetLayoutBinding{
+            .binding = 1,
+            .descriptor_count = 1,
+            .descriptor_type = .storage_buffer,
+            .stage_flags = .{
+                .vertex_bit = true,
+            },
+        },
     };
     const lighting_descriptor_set_layout_bindings = [_]vk.DescriptorSetLayoutBinding{
         vk.DescriptorSetLayoutBinding{
@@ -824,7 +952,7 @@ pub fn main() !void {
     );
     defer vkd.destroyBuffer(device, descriptor_buffer, null);
 
-    var descriptor_memory_mapped: [*]u8 = @ptrCast((try vkd.mapMemory2(
+    var descriptors: [*]u8 = @ptrCast((try vkd.mapMemory2(
         device,
         &vk.MemoryMapInfo{
             .flags = .{},
@@ -858,11 +986,21 @@ pub fn main() !void {
 
     const uniform_buffer_address_info = vk.DescriptorAddressInfoEXT{
         .format = .undefined,
-        .range = @sizeOf(Uniform),
+        .range = uniform_buffer_create_info.size,
         .address = vkd.getBufferDeviceAddress(
             device,
             &vk.BufferDeviceAddressInfo{
                 .buffer = uniform_buffer,
+            },
+        ),
+    };
+    const voxel_buffer_address_info = vk.DescriptorAddressInfoEXT{
+        .format = .undefined,
+        .range = voxel_buffer_create_info.size,
+        .address = vkd.getBufferDeviceAddress(
+            device,
+            &vk.BufferDeviceAddressInfo{
+                .buffer = voxel_buffer,
             },
         ),
     };
@@ -876,9 +1014,9 @@ pub fn main() !void {
             },
         },
         uniform_buffer_descriptor_size,
-        descriptor_memory_mapped,
+        descriptors,
     );
-    descriptor_memory_mapped += uniform_buffer_descriptor_size;
+    descriptors += uniform_buffer_descriptor_size;
 
     vkd.getDescriptorEXT(
         device,
@@ -889,9 +1027,22 @@ pub fn main() !void {
             },
         },
         uniform_buffer_descriptor_size,
-        descriptor_memory_mapped,
+        descriptors,
     );
-    descriptor_memory_mapped += uniform_buffer_descriptor_size;
+    descriptors += uniform_buffer_descriptor_size;
+
+    vkd.getDescriptorEXT(
+        device,
+        &vk.DescriptorGetInfoEXT{
+            .type = .storage_buffer,
+            .data = .{
+                .p_storage_buffer = &voxel_buffer_address_info,
+            },
+        },
+        uniform_buffer_descriptor_size,
+        descriptors,
+    );
+    descriptors += uniform_buffer_descriptor_size;
 
     vkd.getDescriptorEXT(
         device,
@@ -902,9 +1053,9 @@ pub fn main() !void {
             },
         },
         uniform_buffer_descriptor_size,
-        descriptor_memory_mapped,
+        descriptors,
     );
-    descriptor_memory_mapped += uniform_buffer_descriptor_size;
+    descriptors += uniform_buffer_descriptor_size;
 
     vkd.getDescriptorEXT(
         device,
@@ -919,15 +1070,11 @@ pub fn main() !void {
             },
         },
         combined_image_sampler_descriptor_size,
-        descriptor_memory_mapped,
+        descriptors,
     );
-    descriptor_memory_mapped += combined_image_sampler_descriptor_size;
+    descriptors += combined_image_sampler_descriptor_size;
 
-    const start_descriptor_memory_mapped = descriptor_memory_mapped;
-
-    const allocator = std.heap.page_allocator;
-    var voxels = try allocator.alloc(Voxel, volume_len);
-    defer allocator.free(voxels);
+    const start_descriptors = descriptors;
 
     for (0..volume_len) |voxel_i| {
         var sum: usize = 0;
@@ -944,7 +1091,7 @@ pub fn main() !void {
     // factor of 2 is completely arbitrary
     // it's to allow modification of mesh once memory been allocated
     // TODO: fix, more dynamic voxel set modification, and mesh generation
-    var surfaces_len = computeSurfacesLen(voxels.ptr);
+    var surfaces_len = computeSurfacesLen(voxels);
     const surfaces_len_saturated = surfaces_len * 2;
 
     const surface_transfer_buffer_create_info = bufferCreateInfo(
@@ -1002,7 +1149,7 @@ pub fn main() !void {
             .memory_offset = 0,
         }),
     );
-    const surface_transfer_memory_mapped = @as([*]Surface, @ptrCast(@alignCast(try vkd.mapMemory2(
+    const surfaces: [*]Surface = @ptrCast(@alignCast(try vkd.mapMemory2(
         device,
         &vk.MemoryMapInfo{
             .memory = surface_transfer_memory,
@@ -1010,7 +1157,7 @@ pub fn main() !void {
             .flags = .{},
             .offset = 0,
         },
-    ))));
+    )));
 
     const surface_buffer_create_info = bufferCreateInfo(
         vk.BufferUsageFlags{
@@ -1518,10 +1665,13 @@ pub fn main() !void {
     // const random = rand.random();
     var light_angle: f32 = 0.0;
 
-    const side: f32 = (side_len / @sqrt(@as(f32, @floatFromInt(directions))));
-    uniform_memory_mapped.camera.position = [_]f32{side} ** directions;
+    // const side: f32 = (side_len / @sqrt(@as(f32, @floatFromInt(directions))));
+    uniform.camera.position = [_]f32{-0.5} ** directions;
 
-    var surfaces_regenerate = true;
+    voxels[0] = Voxel.Stone;
+    voxels[0b000_010_010_011] = Voxel.Stone;
+
+    var voxel_regenerate = true;
     var init_shadow = true;
 
     while (true) {
@@ -1606,30 +1756,30 @@ pub fn main() !void {
                 }
 
                 if (camera_keyboard.positive[0] and !camera_keyboard.negative[0]) {
-                    uniform_memory_mapped.camera.position[2] -= d[0];
-                    uniform_memory_mapped.camera.position[0] += d[2];
+                    uniform.camera.position[2] -= d[0];
+                    uniform.camera.position[0] += d[2];
                 } else if (!camera_keyboard.positive[0] and camera_keyboard.negative[0]) {
-                    uniform_memory_mapped.camera.position[2] += d[0];
-                    uniform_memory_mapped.camera.position[0] -= d[2];
+                    uniform.camera.position[2] += d[0];
+                    uniform.camera.position[0] -= d[2];
                 }
 
                 if (camera_keyboard.positive[1] and !camera_keyboard.negative[1]) {
-                    uniform_memory_mapped.camera.position[1] += d[1];
+                    uniform.camera.position[1] += d[1];
                 } else if (!camera_keyboard.positive[1] and camera_keyboard.negative[1]) {
-                    uniform_memory_mapped.camera.position[1] -= d[1];
+                    uniform.camera.position[1] -= d[1];
                 }
 
                 if (camera_keyboard.positive[2] and !camera_keyboard.negative[2]) {
-                    uniform_memory_mapped.camera.position[2] += d[2];
-                    uniform_memory_mapped.camera.position[0] += d[0];
+                    uniform.camera.position[2] += d[2];
+                    uniform.camera.position[0] += d[0];
                 } else if (!camera_keyboard.positive[2] and camera_keyboard.negative[2]) {
-                    uniform_memory_mapped.camera.position[2] -= d[2];
-                    uniform_memory_mapped.camera.position[0] -= d[0];
+                    uniform.camera.position[2] -= d[2];
+                    uniform.camera.position[0] -= d[0];
                 }
             }
 
             if (camera_pointer.create != camera_pointer.destroy) {
-                const origin = uniform_memory_mapped.camera.position;
+                const origin = uniform.camera.position;
                 var indices: [directions]usize = undefined;
                 var combined_indices: usize = 0;
 
@@ -1667,7 +1817,7 @@ pub fn main() !void {
                         } else if (old_combined_indices != null) {
                             voxels[old_combined_indices.?] = Voxel.Stone;
                         }
-                        surfaces_regenerate = true;
+                        voxel_regenerate = true;
                         break;
                     }
                     var t_min: f32 = std.math.inf(f32);
@@ -1699,34 +1849,34 @@ pub fn main() !void {
             camera_pointer.create = false;
             camera_pointer.destroy = false;
 
-            if (surfaces_regenerate) {
-                surfaces_len = computeSurfacesLen(voxels.ptr);
-                generateSurfaces(voxels.ptr, surface_transfer_memory_mapped);
+            if (voxel_regenerate) {
+                surfaces_len = computeSurfacesLen(voxels);
+                generateSurfaces(voxels, surfaces);
             }
 
             var camera_scale: [directions - 1]f32 = undefined;
             camera_scale[0] = 0.2;
-            uniform_memory_mapped.camera.near = camera_scale[0] / @tan(zx_half_range);
-            uniform_memory_mapped.camera.scale[0] = uniform_memory_mapped.camera.near / camera_scale[0];
-            uniform_memory_mapped.camera.scale[1] = uniform_memory_mapped.camera.scale[0] *
+            uniform.camera.near = camera_scale[0] / @tan(zx_half_range);
+            uniform.camera.scale[0] = uniform.camera.near / camera_scale[0];
+            uniform.camera.scale[1] = uniform.camera.scale[0] *
                 @as(f32, @floatFromInt(swapchain_extent.width)) /
                 @as(f32, @floatFromInt(swapchain_extent.height));
 
             for (0..directions - 1) |direction| {
-                uniform_memory_mapped.camera.cos[direction] = @cos(angles[direction]);
-                uniform_memory_mapped.camera.sin[direction] = @sin(angles[direction]);
+                uniform.camera.cos[direction] = @cos(angles[direction]);
+                uniform.camera.sin[direction] = @sin(angles[direction]);
             }
-            uniform_memory_mapped.light.direction = light_direction;
+            uniform.light.direction = light_direction;
 
             camera_scale[1] = camera_scale[0] * @as(f32, @floatFromInt(swapchain_extent.height)) /
                 @as(f32, @floatFromInt(swapchain_extent.width));
 
-            uniform_memory_mapped.light.affine = computeLightAffine(
-                uniform_memory_mapped.camera.position,
+            uniform.light.affine = computeLightAffine(
+                uniform.camera.position,
                 light_direction,
                 angles,
-                uniform_memory_mapped.camera.near,
-                uniform_memory_mapped.camera.near + 10.0,
+                uniform.camera.near,
+                uniform.camera.near + 10.0,
                 camera_scale,
             );
         }
@@ -1800,7 +1950,7 @@ pub fn main() !void {
                         );
                     }
 
-                    descriptor_memory_mapped = start_descriptor_memory_mapped;
+                    descriptors = start_descriptors;
 
                     {
                         const depth_image_create_info: vk.ImageCreateInfo = imageCreateInfo(
@@ -1877,9 +2027,9 @@ pub fn main() !void {
                                 },
                             },
                             combined_image_sampler_descriptor_size,
-                            descriptor_memory_mapped,
+                            descriptors,
                         );
-                        descriptor_memory_mapped += combined_image_sampler_descriptor_size;
+                        descriptors += combined_image_sampler_descriptor_size;
                     }
 
                     {
@@ -1957,9 +2107,9 @@ pub fn main() !void {
                                 },
                             },
                             combined_image_sampler_descriptor_size,
-                            descriptor_memory_mapped,
+                            descriptors,
                         );
-                        descriptor_memory_mapped += combined_image_sampler_descriptor_size;
+                        descriptors += combined_image_sampler_descriptor_size;
                     }
 
                     init_swapchain = true;
@@ -2066,7 +2216,7 @@ pub fn main() !void {
         {
             try vkd.beginCommandBuffer(command_buffers[frame], &.{ .flags = .{ .one_time_submit_bit = true } });
 
-            if (surfaces_regenerate) {
+            if (voxel_regenerate) {
                 vkd.cmdCopyBuffer2(
                     command_buffers[frame],
                     &vk.CopyBufferInfo2{
@@ -2080,8 +2230,21 @@ pub fn main() !void {
                         }),
                     },
                 );
-                // TODO: transfers can conflict if command_buffers[0] does transfer and command_buffers[1] also does transfer
-                surfaces_regenerate = false;
+                // TODO: only update a sub cubic region, rather than entire cubic region
+                vkd.cmdCopyBuffer2(
+                    command_buffers[frame],
+                    &vk.CopyBufferInfo2{
+                        .src_buffer = voxel_transfer_buffer,
+                        .dst_buffer = voxel_buffer,
+                        .region_count = 1,
+                        .p_regions = @ptrCast(&vk.BufferCopy2{
+                            .src_offset = 0,
+                            .dst_offset = 0,
+                            .size = voxel_buffer_create_info.size,
+                        }),
+                    },
+                );
+                voxel_regenerate = false;
             }
 
             var shadow_image_memory_barrier = image_memory_barrier;
@@ -2257,6 +2420,30 @@ pub fn main() !void {
                     .p_image_memory_barriers = &image_memory_barriers,
                 });
             }
+
+            // TODO: only depend on updated sub cube region
+            vkd.cmdPipelineBarrier2(command_buffers[frame], &vk.DependencyInfo{
+                .buffer_memory_barrier_count = 1,
+                .p_buffer_memory_barriers = @ptrCast(&vk.BufferMemoryBarrier2{
+                    .buffer = voxel_buffer,
+                    .offset = 0,
+                    .size = voxel_buffer_create_info.size,
+                    .src_stage_mask = .{
+                        .copy_bit = true,
+                    },
+                    .dst_stage_mask = .{
+                        .copy_bit = true,
+                    },
+                    .src_access_mask = .{
+                        .transfer_write_bit = true,
+                    },
+                    .dst_access_mask = .{
+                        .transfer_write_bit = true,
+                    },
+                    .src_queue_family_index = 0,
+                    .dst_queue_family_index = 0,
+                }),
+            });
 
             // geometry pass
             {

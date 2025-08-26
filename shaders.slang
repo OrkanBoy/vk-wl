@@ -15,9 +15,11 @@ struct Uniform {
   float2 camera_sin;
   float2 camera_scale;
 }
-enum Voxel {
-  Air,
-  Stone,
+
+typedef uint8_t Voxel;
+enum {
+  AIR = 0,
+  STONE = 1,
 };
 
 
@@ -105,18 +107,20 @@ struct VSOutput {
 VSOutput vertexGeometry(VSInput input, uint vertex_id: SV_VertexID) {
   var output: VSOutput;
 
-  var position: float3;
-  // var combined_indices = 0;
+  var combined_indices = 0;
+  var indices: uint3;
 
   var surface = input.surface;
   for (var _direction = 0; _direction != directions; _direction += 1) {
     let direction = directions - _direction - 1;
-    let index = surface & ((1 << log_side_len) - 1);
-    position[direction] = float(index);
-    // combined_indices |= morton(index);
-    // combined_indices <<= 1;
+    indices[direction] = surface & ((1 << log_side_len) - 1);
+    combined_indices <<= 1;
+    combined_indices |= morton(indices[direction]);
     surface >>= log_side_len;
   }
+
+  var position = float3(indices);
+
   output.surface_direction_signed = surface & ((1 << (log_directions + 1)) - 1);
   let surface_direction_unsigned = surface & ((1 << log_directions) - 1);
   surface >>= log_directions;
@@ -162,7 +166,11 @@ VSOutput vertexGeometry(VSInput input, uint vertex_id: SV_VertexID) {
     position[2],
   };
 
-  output.ambient = vertex_id / 3.0;
+  if (indices[0] == 0 || voxels[(combined_indices & ~morton_mask) | morton(indices[0] - 1)] == AIR) {
+    output.ambient = 1.0;
+  } else {
+    output.ambient = 0.5;
+  }
 
   return output;
 }
@@ -253,12 +261,14 @@ float3 fragmentLighting(VSOutput input) {
   for (var direction = 0; direction != directions; direction += 1) {
     output[direction] = float(direction_sign ^ (direction != direction_unsigned));
   }
-  output *= light;
+  // output *= light;
 
   return output * bit_cast<float>(geometry_sampler.Sample(input.sample_position)[1]);
 }
 
 }
+
+static const uint morton_mask = 0b001001001001;
 
 uint morton(uint x) {
   {
