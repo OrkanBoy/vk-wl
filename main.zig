@@ -425,7 +425,7 @@ pub fn main() !void {
         geometry_direction_memory,
         null,
     );
-    const geometry_image_format: vk.Format = .r32g32_uint;
+    const geometry_image_format: vk.Format = .r32g32b32a32_uint;
     var geometry_image: vk.Image = .null_handle;
     defer vkd.destroyImage(
         device,
