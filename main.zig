@@ -11,6 +11,7 @@ const tau = std.math.tau;
 const print = std.debug.print;
 const nanoTimestamp = std.time.nanoTimestamp;
 const log2_int_ceil = std.math.log2_int_ceil;
+const log2_int = std.math.log2_int;
 
 const RegistryListenerData = struct {
     wl_compositor: *wl.Compositor,
@@ -427,10 +428,38 @@ pub fn main() !void {
     };
     defer geometry.destroy(vkd, device);
 
-    var color: RenderTarget = .{
-        .format = .r16g16b16_sfloat,
-    };
-    defer color.destroy(vkd, device);
+    // var color: RenderTarget = .{
+    //     .format = .r16g16b16_sfloat,
+    // };
+    // defer color.destroy(vkd, device);
+    //
+    // var luminance: RenderTarget = .{
+    //     .format = .r16_sfloat,
+    // };
+    // defer luminance.destroy(vkd, device);
+
+    // var luminance_buffer: Buffer = try Buffer.create(
+    //     vkd,
+    //     device,
+    //     physical_device_memory_properties,
+    //     vk.BufferUsageFlags{
+    //         .uniform_buffer_bit = true,
+    //         .transfer_dst_bit = true,
+    //         .shader_device_address_bit = true,
+    //     },
+    //     @sizeOf(f32),
+    //     vk.MemoryPropertyFlags{
+    //         .device_local_bit = true,
+    //     },
+    // );
+    // defer luminance_buffer.destroy(vkd, device);
+    //
+    // const luminance_buffer_address = vkd.getBufferDeviceAddress(
+    //     device,
+    //     &vk.BufferDeviceAddressInfo{
+    //         .buffer = luminance_buffer.buffer,
+    //     },
+    // );
 
     const _voxels: []Voxel = try allocator.alloc(Voxel, volume_len);
     defer allocator.free(_voxels);
@@ -450,6 +479,8 @@ pub fn main() !void {
         vkd,
         device,
         shadow_extent,
+        false,
+        false,
         physical_device_memory_properties,
     );
     defer shadow.destroy(vkd, device);
@@ -482,35 +513,7 @@ pub fn main() !void {
         null,
     );
 
-    const full_screen_sampler = try vkd.createSampler(
-        device,
-        &vk.SamplerCreateInfo{
-            .address_mode_u = .clamp_to_border,
-            .address_mode_v = .clamp_to_border,
-            .address_mode_w = undefined,
-            .anisotropy_enable = vk.FALSE,
-            .border_color = .float_opaque_black,
-            .compare_enable = vk.FALSE,
-            .compare_op = .less,
-            .flags = .{},
-            .mag_filter = .nearest,
-            .min_filter = .nearest,
-            .max_anisotropy = 0,
-            .max_lod = 0,
-            .min_lod = 0,
-            .mip_lod_bias = 0,
-            .mipmap_mode = .nearest,
-            .unnormalized_coordinates = vk.FALSE,
-        },
-        null,
-    );
-    defer vkd.destroySampler(
-        device,
-        full_screen_sampler,
-        null,
-    );
-
-    var uniform: Buffer = try Buffer.init(
+    var uniform: Buffer = try Buffer.create(
         vkd,
         device,
         physical_device_memory_properties,
@@ -528,26 +531,6 @@ pub fn main() !void {
 
     const uniform_mapped: *Uniform = @ptrCast(@alignCast(try uniform.mapMemory(vkd, device)));
 
-    const descriptor_types_list = .{
-        .shadow = .{
-            .uniform = .uniform_buffer,
-        },
-        .geometry = .{
-            .uniform = .uniform_buffer,
-        },
-        .lighting = .{
-            .uniform = .uniform_buffer,
-            .shadow = .combined_image_sampler,
-            .depth = .combined_image_sampler,
-            .geometry = .combined_image_sampler,
-        },
-    };
-    const descriptor_memory_offsets = initDescriptorBufferOffsets(
-        DescriptorBufferOffsets(descriptor_types_list),
-        physical_device_descriptor_buffer_properties,
-    );
-    print("{x}\n\n\n", .{descriptor_memory_offsets.geometry.uniform.value});
-
     const shaders_spv align(@alignOf(u32)) = @embedFile("shaders").*;
 
     const shader = try vkd.createShaderModule(
@@ -559,20 +542,47 @@ pub fn main() !void {
         null,
     );
     defer vkd.destroyShaderModule(device, shader, null);
+    // descriptor_set_layout, descriptor_set_layout_stage_flags, pipeline_create_info
 
     const pipelines = try createPipelines(
         Pipelines(.{
-            .shadow = vk.ShaderStageFlags{
-                .vertex_bit = true,
+            .shadow = .{
+                .descriptor_set_layout_stage = vk.ShaderStageFlags{
+                    .vertex_bit = true,
+                },
+                .descriptors = .{
+                    .uniform = .uniform_buffer,
+                },
             },
-            .geometry = vk.ShaderStageFlags{
-                .vertex_bit = true,
+            .geometry = .{
+                .descriptor_set_layout_stage = vk.ShaderStageFlags{
+                    .vertex_bit = true,
+                },
+                .descriptors = .{
+                    .uniform = .uniform_buffer,
+                },
             },
-            .lighting = vk.ShaderStageFlags{
-                .fragment_bit = true,
+            .color = .{
+                .descriptor_set_layout_stage = vk.ShaderStageFlags{
+                    .fragment_bit = true,
+                },
+                .descriptors = .{
+                    .uniform = .uniform_buffer,
+                    .shadow = .combined_image_sampler,
+                    .depth = .input_attachment,
+                    .geometry = .input_attachment,
+                },
             },
+            // .tonemap = .{
+            //     .descriptor_set_layout_stage = vk.ShaderStageFlags{
+            //         .fragment_bit = true,
+            //     },
+            //     .descriptors = .{
+            //         .uniform = .uniform_buffer,
+            //         .color = .sampled_image,
+            //     },
+            // },
         }),
-        descriptor_types_list,
         .{
             .shadow = vk.GraphicsPipelineCreateInfo{
                 .flags = .{
@@ -677,26 +687,28 @@ pub fn main() !void {
                     .primitive_restart_enable = vk.FALSE,
                 },
                 .p_color_blend_state = &vk.PipelineColorBlendStateCreateInfo{
-                    .attachment_count = 1,
+                    .attachment_count = 2,
                     .logic_op = undefined,
                     .blend_constants = undefined,
                     .flags = .{},
                     .logic_op_enable = vk.FALSE,
-                    .p_attachments = @ptrCast(&vk.PipelineColorBlendAttachmentState{
-                        .color_write_mask = .{
-                            .r_bit = true,
-                            .g_bit = true,
-                            .b_bit = true,
-                            .a_bit = true,
+                    .p_attachments = &[_]vk.PipelineColorBlendAttachmentState{
+                        vk.PipelineColorBlendAttachmentState{
+                            .color_write_mask = .{
+                                .r_bit = true,
+                                .g_bit = true,
+                                .b_bit = true,
+                                .a_bit = true,
+                            },
+                            .blend_enable = vk.FALSE,
+                            .alpha_blend_op = undefined,
+                            .color_blend_op = undefined,
+                            .dst_alpha_blend_factor = undefined,
+                            .dst_color_blend_factor = undefined,
+                            .src_alpha_blend_factor = undefined,
+                            .src_color_blend_factor = undefined,
                         },
-                        .blend_enable = vk.FALSE,
-                        .alpha_blend_op = undefined,
-                        .color_blend_op = undefined,
-                        .dst_alpha_blend_factor = undefined,
-                        .dst_color_blend_factor = undefined,
-                        .src_alpha_blend_factor = undefined,
-                        .src_color_blend_factor = undefined,
-                    }),
+                    } ** 2,
                 },
                 .p_depth_stencil_state = &vk.PipelineDepthStencilStateCreateInfo{
                     .depth_bounds_test_enable = vk.TRUE,
@@ -777,14 +789,26 @@ pub fn main() !void {
                 .render_pass = .null_handle,
                 .subpass = undefined,
                 .p_next = &vk.PipelineRenderingCreateInfo{
-                    .color_attachment_count = 1,
-                    .p_color_attachment_formats = &[_]vk.Format{geometry.format},
+                    .color_attachment_count = 2,
+                    .p_color_attachment_formats = &[_]vk.Format{
+                        geometry.format,
+                        surface_format.format,
+                    },
                     .depth_attachment_format = depth.format,
                     .stencil_attachment_format = .undefined,
                     .view_mask = 0,
+                    .p_next = @ptrCast(&vk.RenderingInputAttachmentIndexInfo{
+                        .p_depth_input_attachment_index = @ptrCast(&@as(u32, 0)),
+                        .color_attachment_count = 2,
+                        .p_color_attachment_input_indices = &[_]u32{
+                            1,
+                            vk.ATTACHMENT_UNUSED,
+                        },
+                        .p_stencil_input_attachment_index = @ptrCast(&vk.ATTACHMENT_UNUSED),
+                    }),
                 },
             },
-            .lighting = vk.GraphicsPipelineCreateInfo{
+            .color = vk.GraphicsPipelineCreateInfo{
                 .flags = .{
                     .descriptor_buffer_bit_ext = true,
                 },
@@ -795,27 +819,40 @@ pub fn main() !void {
                     .primitive_restart_enable = vk.FALSE,
                 },
                 .p_color_blend_state = &vk.PipelineColorBlendStateCreateInfo{
-                    .attachment_count = 1,
+                    .attachment_count = 2,
                     .blend_constants = undefined,
                     .logic_op = undefined,
                     .logic_op_enable = undefined,
-                    .p_attachments = @ptrCast(&vk.PipelineColorBlendAttachmentState{
-                        .color_write_mask = .{
-                            .r_bit = true,
-                            .b_bit = true,
-                            .g_bit = true,
-                            .a_bit = false,
+                    .p_attachments = &[_]vk.PipelineColorBlendAttachmentState{
+                        vk.PipelineColorBlendAttachmentState{
+                            .color_write_mask = .{
+                                .r_bit = true,
+                                .b_bit = true,
+                                .g_bit = true,
+                                .a_bit = true,
+                            },
+                            .blend_enable = undefined,
+                            .src_color_blend_factor = undefined,
+                            .dst_color_blend_factor = undefined,
+                            .color_blend_op = undefined,
+                            .src_alpha_blend_factor = undefined,
+                            .dst_alpha_blend_factor = undefined,
+                            .alpha_blend_op = undefined,
                         },
-                        .blend_enable = undefined,
-                        .src_color_blend_factor = undefined,
-                        .dst_color_blend_factor = undefined,
-                        .color_blend_op = undefined,
-                        .src_alpha_blend_factor = undefined,
-                        .dst_alpha_blend_factor = undefined,
-                        .alpha_blend_op = undefined,
-                    }),
+                    } ** 2,
                 },
-                .p_depth_stencil_state = null,
+                .p_depth_stencil_state = &vk.PipelineDepthStencilStateCreateInfo{
+                    .depth_test_enable = vk.FALSE,
+                    .depth_write_enable = vk.FALSE,
+                    .depth_bounds_test_enable = vk.FALSE,
+                    .stencil_test_enable = vk.FALSE,
+                    .depth_compare_op = undefined,
+                    .flags = .{},
+                    .min_depth_bounds = undefined,
+                    .max_depth_bounds = undefined,
+                    .back = undefined,
+                    .front = undefined,
+                },
                 .p_vertex_input_state = &vk.PipelineVertexInputStateCreateInfo{
                     .vertex_attribute_description_count = 0,
                     .vertex_binding_description_count = 0,
@@ -862,7 +899,7 @@ pub fn main() !void {
                         .module = shader,
                     },
                     vk.PipelineShaderStageCreateInfo{
-                        .p_name = "fragmentLighting",
+                        .p_name = "fragmentColor",
                         .stage = .{
                             .fragment_bit = true,
                         },
@@ -872,35 +909,127 @@ pub fn main() !void {
                 .render_pass = .null_handle,
                 .subpass = undefined,
                 .p_next = &vk.PipelineRenderingCreateInfo{
-                    .color_attachment_count = 1,
-                    .p_color_attachment_formats = @ptrCast(&surface_format.format),
-                    .depth_attachment_format = .undefined,
+                    .color_attachment_count = 2,
+                    .p_color_attachment_formats = &[_]vk.Format{
+                        geometry.format,
+                        surface_format.format,
+                    },
+                    .depth_attachment_format = depth.format,
                     .stencil_attachment_format = .undefined,
                     .view_mask = 0,
                 },
             },
+            // .tonemap = vk.GraphicsPipelineCreateInfo{
+            //     .flags = .{
+            //         .descriptor_buffer_bit_ext = true,
+            //     },
+            //     .base_pipeline_handle = .null_handle,
+            //     .base_pipeline_index = undefined,
+            //     .p_input_assembly_state = &vk.PipelineInputAssemblyStateCreateInfo{
+            //         .topology = .triangle_list,
+            //         .primitive_restart_enable = vk.FALSE,
+            //     },
+            //     .p_color_blend_state = &vk.PipelineColorBlendStateCreateInfo{
+            //         .attachment_count = 1,
+            //         .blend_constants = undefined,
+            //         .logic_op = undefined,
+            //         .logic_op_enable = undefined,
+            //         .p_attachments = @ptrCast(&vk.PipelineColorBlendAttachmentState{
+            //             .color_write_mask = .{
+            //                 .r_bit = true,
+            //                 .b_bit = true,
+            //                 .g_bit = true,
+            //                 .a_bit = false,
+            //             },
+            //             .blend_enable = undefined,
+            //             .src_color_blend_factor = undefined,
+            //             .dst_color_blend_factor = undefined,
+            //             .color_blend_op = undefined,
+            //             .src_alpha_blend_factor = undefined,
+            //             .dst_alpha_blend_factor = undefined,
+            //             .alpha_blend_op = undefined,
+            //         }),
+            //     },
+            //     .p_depth_stencil_state = null,
+            //     .p_vertex_input_state = &vk.PipelineVertexInputStateCreateInfo{
+            //         .vertex_attribute_description_count = 0,
+            //         .vertex_binding_description_count = 0,
+            //     },
+            //     .p_rasterization_state = &vk.PipelineRasterizationStateCreateInfo{
+            //         .cull_mode = .{ .back_bit = true },
+            //         .front_face = .counter_clockwise,
+            //         .polygon_mode = .fill,
+            //         .depth_bias_enable = vk.FALSE,
+            //         .depth_clamp_enable = vk.FALSE,
+            //         .depth_bias_clamp = 0.0,
+            //         .depth_bias_constant_factor = 0.0,
+            //         .depth_bias_slope_factor = 0.0,
+            //         .line_width = 1.0,
+            //         .rasterizer_discard_enable = vk.FALSE,
+            //     },
+            //     .p_multisample_state = &vk.PipelineMultisampleStateCreateInfo{
+            //         .rasterization_samples = .{ .@"1_bit" = true },
+            //         .sample_shading_enable = vk.FALSE,
+            //         .min_sample_shading = 1,
+            //         .alpha_to_coverage_enable = vk.FALSE,
+            //         .alpha_to_one_enable = vk.FALSE,
+            //     },
+            //     .p_viewport_state = &vk.PipelineViewportStateCreateInfo{
+            //         .scissor_count = 1,
+            //         .p_scissors = null,
+            //         .viewport_count = 1,
+            //         .p_viewports = null,
+            //     },
+            //     .p_dynamic_state = &vk.PipelineDynamicStateCreateInfo{
+            //         .dynamic_state_count = 2,
+            //         .p_dynamic_states = @ptrCast(&[_]vk.DynamicState{
+            //             .viewport,
+            //             .scissor,
+            //         }),
+            //     },
+            //     .stage_count = 2,
+            //     .p_stages = &[_]vk.PipelineShaderStageCreateInfo{
+            //         vk.PipelineShaderStageCreateInfo{
+            //             .p_name = "vertexFullScreen",
+            //             .stage = .{
+            //                 .vertex_bit = true,
+            //             },
+            //             .module = shader,
+            //         },
+            //         vk.PipelineShaderStageCreateInfo{
+            //             .p_name = "fragmentTonemap",
+            //             .stage = .{
+            //                 .fragment_bit = true,
+            //             },
+            //             .module = shader,
+            //         },
+            //     },
+            //     .render_pass = .null_handle,
+            //     .subpass = undefined,
+            //     .p_next = &vk.PipelineRenderingCreateInfo{
+            //         .color_attachment_count = 1,
+            //         .p_color_attachment_formats = @ptrCast(&surface_format.format),
+            //         .depth_attachment_format = .undefined,
+            //         .stencil_attachment_format = .undefined,
+            //         .view_mask = 0,
+            //     },
+            // },
         },
         vkd,
         device,
+        physical_device_descriptor_buffer_properties,
     );
     defer destroyPipelines(pipelines, vkd, device);
 
-    const shadow_descriptor_set_layout_size = vkd.getDescriptorSetLayoutSizeEXT(
-        device,
-        pipelines.shadow.descriptor_set_layout,
-    );
+    var descriptors_buffer_size: vk.DeviceSize = 0;
+    inline for (@typeInfo(@TypeOf(pipelines)).@"struct".fields) |pipelines_field| {
+        descriptors_buffer_size += vkd.getDescriptorSetLayoutSizeEXT(
+            device,
+            @field(pipelines, pipelines_field.name).descriptor_set_layout,
+        );
+    }
 
-    const geometry_descriptor_set_layout_size = vkd.getDescriptorSetLayoutSizeEXT(
-        device,
-        pipelines.geometry.descriptor_set_layout,
-    );
-
-    const lighting_descriptor_set_layout_size = vkd.getDescriptorSetLayoutSizeEXT(
-        device,
-        pipelines.lighting.descriptor_set_layout,
-    );
-
-    var descriptors: Buffer = try Buffer.init(
+    var descriptors: Buffer = try Buffer.create(
         vkd,
         device,
         physical_device_memory_properties,
@@ -908,10 +1037,7 @@ pub fn main() !void {
             .resource_descriptor_buffer_bit_ext = true,
             .shader_device_address_bit = true,
         },
-        0 +
-            shadow_descriptor_set_layout_size +
-            geometry_descriptor_set_layout_size +
-            lighting_descriptor_set_layout_size,
+        descriptors_buffer_size,
         vk.MemoryPropertyFlags{
             .host_visible_bit = true,
             .host_coherent_bit = true,
@@ -940,7 +1066,7 @@ pub fn main() !void {
     };
 
     getDescriptor(
-        descriptor_memory_offsets.shadow.uniform,
+        pipelines.shadow.descriptors.uniform,
         vkd,
         device,
         physical_device_descriptor_buffer_properties,
@@ -949,7 +1075,7 @@ pub fn main() !void {
     );
 
     getDescriptor(
-        descriptor_memory_offsets.geometry.uniform,
+        pipelines.geometry.descriptors.uniform,
         vkd,
         device,
         physical_device_descriptor_buffer_properties,
@@ -958,7 +1084,7 @@ pub fn main() !void {
     );
 
     getDescriptor(
-        descriptor_memory_offsets.lighting.uniform,
+        pipelines.color.descriptors.uniform,
         vkd,
         device,
         physical_device_descriptor_buffer_properties,
@@ -967,7 +1093,7 @@ pub fn main() !void {
     );
 
     getDescriptor(
-        descriptor_memory_offsets.lighting.shadow,
+        pipelines.color.descriptors.shadow,
         vkd,
         device,
         physical_device_descriptor_buffer_properties,
@@ -979,6 +1105,19 @@ pub fn main() !void {
         descriptors_mapped,
     );
 
+    // getDescriptor(
+    //     pipelines.tonemap.descriptors.uniform,
+    //     vkd,
+    //     device,
+    //     physical_device_descriptor_buffer_properties,
+    //     vk.DescriptorAddressInfoEXT{
+    //         .format = .undefined,
+    //         .address = luminance_buffer_address,
+    //         .range = luminance_buffer.size,
+    //     },
+    //     descriptors_mapped,
+    // );
+    //
     for (0..volume_len) |voxel_i| {
         var sum: usize = 0;
         for (0..directions) |_direction_i| {
@@ -997,7 +1136,7 @@ pub fn main() !void {
     var surfaces_len = computeSurfacesLen(voxels);
     const surfaces_len_saturated = surfaces_len * 2;
 
-    var surfaces_transfer: Buffer = try Buffer.init(
+    var surfaces_transfer: Buffer = try Buffer.create(
         vkd,
         device,
         physical_device_memory_properties,
@@ -1013,7 +1152,7 @@ pub fn main() !void {
 
     const surfaces_mapped: [*]Surface = @ptrCast(@alignCast(try surfaces_transfer.mapMemory(vkd, device)));
 
-    var surfaces: Buffer = try Buffer.init(
+    var surfaces: Buffer = try Buffer.create(
         vkd,
         device,
         physical_device_memory_properties,
@@ -1308,8 +1447,6 @@ pub fn main() !void {
             );
         }
 
-        var init_swapchain: bool = false;
-
         if (xdg_toplevel_event) |event| event_handle: {
             switch (event) {
                 .close => {
@@ -1348,7 +1485,9 @@ pub fn main() !void {
 
                         geometry.destroy(vkd, device);
 
-                        color.destroy(vkd, device);
+                        // color.destroy(vkd, device);
+
+                        // luminance.destroy(vkd, device);
                     }
 
                     {
@@ -1356,18 +1495,20 @@ pub fn main() !void {
                             vkd,
                             device,
                             swapchain_extent,
+                            false,
+                            true,
                             physical_device_memory_properties,
                         );
 
                         getDescriptor(
-                            descriptor_memory_offsets.lighting.depth,
+                            pipelines.color.descriptors.depth,
                             vkd,
                             device,
                             physical_device_descriptor_buffer_properties,
                             vk.DescriptorImageInfo{
-                                .image_layout = .depth_read_only_optimal,
+                                .image_layout = .rendering_local_read,
                                 .image_view = depth.image_view,
-                                .sampler = full_screen_sampler,
+                                .sampler = .null_handle,
                             },
                             descriptors_mapped,
                         );
@@ -1378,33 +1519,57 @@ pub fn main() !void {
                             vkd,
                             device,
                             swapchain_extent,
+                            false,
+                            true,
                             physical_device_memory_properties,
                         );
 
                         getDescriptor(
-                            descriptor_memory_offsets.lighting.geometry,
+                            pipelines.color.descriptors.geometry,
                             vkd,
                             device,
                             physical_device_descriptor_buffer_properties,
                             vk.DescriptorImageInfo{
-                                .image_layout = .depth_read_only_optimal,
+                                .image_layout = .rendering_local_read,
                                 .image_view = geometry.image_view,
-                                .sampler = full_screen_sampler,
+                                .sampler = .null_handle,
                             },
                             descriptors_mapped,
                         );
                     }
 
-                    {
-                        try color.init(
-                            vkd,
-                            device,
-                            swapchain_extent,
-                            physical_device_memory_properties,
-                        );
-                    }
-
-                    init_swapchain = true;
+                    // {
+                    //     try color.init(
+                    //         vkd,
+                    //         device,
+                    //         swapchain_extent,
+                    //         false,
+                    //         physical_device_memory_properties,
+                    //     );
+                    //
+                    //     getDescriptor(
+                    //         pipelines.tonemap.descriptors.color,
+                    //         vkd,
+                    //         device,
+                    //         physical_device_descriptor_buffer_properties,
+                    //         vk.DescriptorImageInfo{
+                    //             .image_layout = .read_only_optimal,
+                    //             .image_view = color.image_view,
+                    //             .sampler = .null_handle,
+                    //         },
+                    //         descriptors_mapped,
+                    //     );
+                    // }
+                    //
+                    // {
+                    //     try luminance.init(
+                    //         vkd,
+                    //         device,
+                    //         swapchain_extent,
+                    //         true,
+                    //         physical_device_memory_properties,
+                    //     );
+                    // }
 
                     swapchain = try vkd.createSwapchainKHR(
                         device,
@@ -1452,37 +1617,10 @@ pub fn main() !void {
             xdg_toplevel_event = null;
         }
 
-        var descriptor_buffer_binding_info = vk.DescriptorBufferBindingInfoEXT{
+        const descriptor_buffer_binding_info = vk.DescriptorBufferBindingInfoEXT{
             .address = descriptor_buffer_device_address,
             .usage = descriptors.usage,
         };
-        var descriptor_buffer_offsets_info = vk.SetDescriptorBufferOffsetsInfoEXT{
-            .first_set = 0,
-            .set_count = 1,
-            .layout = .null_handle,
-            .p_buffer_indices = &[_]u32{0},
-            .stage_flags = undefined,
-            .p_offsets = &[_]vk.DeviceSize{0},
-        };
-        const image_memory_barrier: vk.ImageMemoryBarrier2 = .{
-            .src_stage_mask = undefined,
-            .src_access_mask = undefined,
-            .old_layout = undefined,
-            .new_layout = undefined,
-            .dst_stage_mask = undefined,
-            .dst_access_mask = undefined,
-            .image = undefined,
-            .src_queue_family_index = 0,
-            .dst_queue_family_index = 0,
-            .subresource_range = .{
-                .aspect_mask = .{},
-                .base_array_layer = 0,
-                .base_mip_level = 0,
-                .layer_count = 1,
-                .level_count = 1,
-            },
-        };
-        // _ = image_memory_barrier;
 
         _ = try vkd.waitForFences(
             device,
@@ -1504,6 +1642,8 @@ pub fn main() !void {
             swapchain_image_semaphores[frame],
             .null_handle,
         )).image_index;
+        const swapchain_image = swapchain_images[swapchain_image_index];
+        const swapchain_image_view = swapchain_image_views[swapchain_image_index];
 
         try vkd.resetCommandPool(device, command_pools[frame], .{});
 
@@ -1529,14 +1669,6 @@ pub fn main() !void {
                 voxel_regenerate = false;
             }
 
-            cmdPipelineImageMemoryBarrier(
-                vkd,
-                command_buffer,
-                [_]*RenderTarget{
-                    &shadow,
-                },
-            );
-
             vkd.cmdPipelineBarrier2(command_buffer, &vk.DependencyInfo{
                 .buffer_memory_barrier_count = 1,
                 .p_buffer_memory_barriers = @ptrCast(&vk.BufferMemoryBarrier2{
@@ -1560,6 +1692,45 @@ pub fn main() !void {
                 }),
             });
 
+            {
+                const image_memory_barriers = [_]vk.ImageMemoryBarrier2{
+                    vk.ImageMemoryBarrier2{
+                        .image = shadow.image,
+                        .src_stage_mask = .{
+                            .fragment_shader_bit = true,
+                        },
+                        .src_access_mask = .{
+                            .depth_stencil_attachment_read_bit = true,
+                        },
+                        .old_layout = .undefined,
+                        .new_layout = .depth_attachment_optimal,
+                        .dst_stage_mask = .{
+                            .early_fragment_tests_bit = true,
+                            .late_fragment_tests_bit = true,
+                        },
+                        .dst_access_mask = .{
+                            .depth_stencil_attachment_write_bit = true,
+                        },
+                        .src_queue_family_index = 0,
+                        .dst_queue_family_index = 0,
+                        .subresource_range = .{
+                            .aspect_mask = .{
+                                .depth_bit = true,
+                            },
+                            .base_array_layer = 0,
+                            .base_mip_level = 0,
+                            .layer_count = 1,
+                            .level_count = 1,
+                        },
+                    },
+                };
+
+                vkd.cmdPipelineBarrier2(command_buffer, &vk.DependencyInfo{
+                    .image_memory_barrier_count = image_memory_barriers.len,
+                    .p_image_memory_barriers = &image_memory_barriers,
+                });
+            }
+
             // shadow pass
             {
                 vkd.cmdBeginRendering(command_buffer, &vk.RenderingInfo{
@@ -1578,7 +1749,7 @@ pub fn main() !void {
                                 .stencil = undefined,
                             },
                         },
-                        .image_layout = shadow.image_memory_barrier.old_layout,
+                        .image_layout = .depth_attachment_optimal,
                         .image_view = shadow.image_view,
                         .load_op = .clear,
                         .store_op = .store,
@@ -1586,32 +1757,12 @@ pub fn main() !void {
                         .resolve_image_layout = .undefined,
                     },
                 });
-                // cmdBindPipeline(pipelines.shadow);
-                // pipeline: vk.Pipeline,
-                // pipeline_layout: vk.PipelineLayout,
-                // descriptor_set_layout_size: vk.DeviceSize
-                // const stage_flags: vk.DeviceSize
 
-                vkd.cmdBindPipeline(
+                cmdBindPipelineAndDescriptors(
+                    pipelines.shadow,
+                    vkd,
                     command_buffer,
-                    .graphics,
-                    pipelines.shadow.pipeline,
-                );
-
-                vkd.cmdBindDescriptorBuffersEXT(
-                    command_buffer,
-                    1,
-                    @ptrCast(&descriptor_buffer_binding_info),
-                );
-                descriptor_buffer_binding_info.address += shadow_descriptor_set_layout_size;
-
-                descriptor_buffer_offsets_info.layout = pipelines.shadow.pipeline_layout;
-                descriptor_buffer_offsets_info.stage_flags = .{
-                    .vertex_bit = true,
-                };
-                vkd.cmdSetDescriptorBufferOffsets2EXT(
-                    command_buffer,
-                    &descriptor_buffer_offsets_info,
+                    descriptor_buffer_binding_info,
                 );
 
                 vkd.cmdBindVertexBuffers(
@@ -1634,20 +1785,131 @@ pub fn main() !void {
             }
 
             {
-                cmdPipelineImageMemoryBarrier(
-                    vkd,
-                    command_buffer,
-                    [_]*RenderTarget{
-                        &depth,
-                        &geometry,
+                const image_memory_barriers = [_]vk.ImageMemoryBarrier2{
+                    vk.ImageMemoryBarrier2{
+                        .image = swapchain_image,
+                        .src_stage_mask = .{
+                            .color_attachment_output_bit = true,
+                        },
+                        .src_access_mask = .{},
+                        .old_layout = .undefined,
+                        .new_layout = .color_attachment_optimal,
+                        .dst_stage_mask = .{
+                            .color_attachment_output_bit = true,
+                        },
+                        .dst_access_mask = .{
+                            .color_attachment_write_bit = true,
+                        },
+                        .src_queue_family_index = 0,
+                        .dst_queue_family_index = 0,
+                        .subresource_range = .{
+                            .aspect_mask = .{
+                                .color_bit = true,
+                            },
+                            .base_array_layer = 0,
+                            .base_mip_level = 0,
+                            .layer_count = 1,
+                            .level_count = 1,
+                        },
                     },
-                );
+                    vk.ImageMemoryBarrier2{
+                        .image = shadow.image,
+                        .src_stage_mask = .{
+                            .early_fragment_tests_bit = true,
+                            .late_fragment_tests_bit = true,
+                        },
+                        .src_access_mask = .{
+                            .depth_stencil_attachment_write_bit = true,
+                        },
+                        .old_layout = .depth_attachment_optimal,
+                        .new_layout = .depth_read_only_optimal,
+                        .dst_stage_mask = .{
+                            .fragment_shader_bit = true,
+                        },
+                        .dst_access_mask = .{
+                            .depth_stencil_attachment_read_bit = true,
+                        },
+                        .src_queue_family_index = 0,
+                        .dst_queue_family_index = 0,
+                        .subresource_range = .{
+                            .aspect_mask = .{
+                                .depth_bit = true,
+                            },
+                            .base_array_layer = 0,
+                            .base_mip_level = 0,
+                            .layer_count = 1,
+                            .level_count = 1,
+                        },
+                    },
+                    vk.ImageMemoryBarrier2{
+                        .image = depth.image,
+                        .src_stage_mask = .{
+                            .early_fragment_tests_bit = true,
+                            .late_fragment_tests_bit = true,
+                        },
+                        .src_access_mask = .{
+                            .depth_stencil_attachment_write_bit = true,
+                        },
+                        .old_layout = .undefined,
+                        .new_layout = .rendering_local_read,
+                        .dst_stage_mask = .{
+                            .early_fragment_tests_bit = true,
+                            .late_fragment_tests_bit = true,
+                        },
+                        .dst_access_mask = .{
+                            .depth_stencil_attachment_write_bit = true,
+                        },
+                        .src_queue_family_index = 0,
+                        .dst_queue_family_index = 0,
+                        .subresource_range = .{
+                            .aspect_mask = .{
+                                .depth_bit = true,
+                            },
+                            .base_array_layer = 0,
+                            .base_mip_level = 0,
+                            .layer_count = 1,
+                            .level_count = 1,
+                        },
+                    },
+                    vk.ImageMemoryBarrier2{
+                        .image = geometry.image,
+                        .src_stage_mask = .{
+                            .color_attachment_output_bit = true,
+                        },
+                        .src_access_mask = .{
+                            .color_attachment_write_bit = true,
+                        },
+                        .old_layout = .undefined,
+                        .new_layout = .rendering_local_read,
+                        .dst_stage_mask = .{
+                            .color_attachment_output_bit = true,
+                        },
+                        .dst_access_mask = .{
+                            .color_attachment_write_bit = true,
+                        },
+                        .src_queue_family_index = 0,
+                        .dst_queue_family_index = 0,
+                        .subresource_range = .{
+                            .aspect_mask = .{
+                                .color_bit = true,
+                            },
+                            .base_array_layer = 0,
+                            .base_mip_level = 0,
+                            .layer_count = 1,
+                            .level_count = 1,
+                        },
+                    },
+                };
+
+                vkd.cmdPipelineBarrier2(command_buffer, &vk.DependencyInfo{
+                    .image_memory_barrier_count = image_memory_barriers.len,
+                    .p_image_memory_barriers = &image_memory_barriers,
+                });
             }
 
-            // geometry pass
+            // geometry+color pass
             {
                 vkd.cmdBeginRendering(command_buffer, &vk.RenderingInfo{
-                    .color_attachment_count = 1,
                     .view_mask = 0,
                     .render_area = .{
                         .offset = offset_zero,
@@ -1662,31 +1924,52 @@ pub fn main() !void {
                                 .stencil = undefined,
                             },
                         },
-                        .image_layout = .depth_attachment_optimal,
+                        .image_layout = .rendering_local_read,
                         .image_view = depth.image_view,
                         .load_op = .clear,
                         .store_op = .store,
                         .resolve_mode = .{},
                         .resolve_image_layout = .undefined,
                     },
-                    .p_color_attachments = @ptrCast(&vk.RenderingAttachmentInfo{
-                        .clear_value = .{
-                            .color = .{
-                                .uint_32 = [_]u32{
-                                    0,
-                                    0,
-                                    0,
-                                    0,
+                    .color_attachment_count = 2,
+                    .p_color_attachments = &[_]vk.RenderingAttachmentInfo{
+                        vk.RenderingAttachmentInfo{
+                            .clear_value = .{
+                                .color = .{
+                                    .uint_32 = [_]u32{
+                                        0,
+                                        0,
+                                        0,
+                                        0,
+                                    },
                                 },
                             },
+                            .image_layout = .rendering_local_read,
+                            .image_view = geometry.image_view,
+                            .load_op = .clear,
+                            .store_op = .store,
+                            .resolve_mode = .{},
+                            .resolve_image_layout = .undefined,
                         },
-                        .image_layout = .color_attachment_optimal,
-                        .image_view = geometry.image_view,
-                        .load_op = .clear,
-                        .store_op = .store,
-                        .resolve_mode = .{},
-                        .resolve_image_layout = .undefined,
-                    }),
+                        vk.RenderingAttachmentInfo{
+                            .clear_value = .{
+                                .color = .{
+                                    .uint_32 = [_]u32{
+                                        0,
+                                        0,
+                                        0,
+                                        0,
+                                    },
+                                },
+                            },
+                            .image_layout = .color_attachment_optimal,
+                            .image_view = swapchain_image_view,
+                            .load_op = .clear,
+                            .store_op = .store,
+                            .resolve_mode = .{},
+                            .resolve_image_layout = .undefined,
+                        },
+                    },
                 });
 
                 vkd.cmdSetViewport(command_buffer, 0, 1, @ptrCast(&vk.Viewport{
@@ -1703,26 +1986,11 @@ pub fn main() !void {
                     .offset = offset_zero,
                 }));
 
-                vkd.cmdBindPipeline(
+                cmdBindPipelineAndDescriptors(
+                    pipelines.geometry,
+                    vkd,
                     command_buffer,
-                    .graphics,
-                    pipelines.geometry.pipeline,
-                );
-
-                vkd.cmdBindDescriptorBuffersEXT(
-                    command_buffer,
-                    1,
-                    @ptrCast(&descriptor_buffer_binding_info),
-                );
-                descriptor_buffer_binding_info.address += geometry_descriptor_set_layout_size;
-
-                descriptor_buffer_offsets_info.layout = pipelines.geometry.pipeline_layout;
-                descriptor_buffer_offsets_info.stage_flags = .{
-                    .vertex_bit = true,
-                };
-                vkd.cmdSetDescriptorBufferOffsets2EXT(
-                    command_buffer,
-                    &descriptor_buffer_offsets_info,
+                    descriptor_buffer_binding_info,
                 );
 
                 vkd.cmdBindVertexBuffers(
@@ -1735,109 +2003,81 @@ pub fn main() !void {
 
                 vkd.cmdDraw(command_buffer, 4, surfaces_len, 0, 0);
 
-                vkd.cmdEndRendering(command_buffer);
-            }
-
-            var swapchain_image_memory_barrier = image_memory_barrier;
-            swapchain_image_memory_barrier.image = swapchain_images[swapchain_image_index];
-            swapchain_image_memory_barrier.subresource_range.aspect_mask.color_bit = true;
-
-            swapchain_image_memory_barrier.src_stage_mask = .{
-                .color_attachment_output_bit = true,
-            };
-            swapchain_image_memory_barrier.src_access_mask = .{};
-            swapchain_image_memory_barrier.old_layout = .undefined;
-
-            swapchain_image_memory_barrier.new_layout = .color_attachment_optimal;
-            swapchain_image_memory_barrier.dst_stage_mask = .{
-                .color_attachment_output_bit = true,
-            };
-            swapchain_image_memory_barrier.dst_access_mask = .{
-                .color_attachment_write_bit = true,
-            };
-
-            {
-                const image_memory_barriers = [_]vk.ImageMemoryBarrier2{
-                    shadow.image_memory_barrier,
-                    depth.image_memory_barrier,
-                    geometry.image_memory_barrier,
-                    swapchain_image_memory_barrier,
-                };
-
-                vkd.cmdPipelineBarrier2(command_buffer, &vk.DependencyInfo{
-                    .image_memory_barrier_count = image_memory_barriers.len,
-                    .p_image_memory_barriers = &image_memory_barriers,
-                });
-
-                shadow.advanceImageMemoryBarrier();
-                depth.advanceImageMemoryBarrier();
-                geometry.advanceImageMemoryBarrier();
-            }
-
-            {
-                vkd.cmdBeginRendering(command_buffer, &vk.RenderingInfo{
-                    .view_mask = 0,
-                    .render_area = .{
-                        .offset = offset_zero,
-                        .extent = swapchain_extent,
-                    },
-                    .layer_count = 1,
-                    .color_attachment_count = 1,
-                    .p_color_attachments = @ptrCast(&vk.RenderingAttachmentInfo{
-                        .image_view = swapchain_image_views[swapchain_image_index],
-                        .clear_value = vk.ClearValue{
-                            .color = .{
-                                .float_32 = [4]f32{
-                                    0.0,
-                                    0.0,
-                                    0.0,
-                                    0.0,
+                {
+                    const image_memory_barriers = [_]vk.ImageMemoryBarrier2{
+                        vk.ImageMemoryBarrier2{
+                            .image = depth.image,
+                            .src_stage_mask = .{
+                                .early_fragment_tests_bit = true,
+                                .late_fragment_tests_bit = true,
+                            },
+                            .src_access_mask = .{
+                                .depth_stencil_attachment_write_bit = true,
+                            },
+                            .old_layout = .rendering_local_read,
+                            .new_layout = .rendering_local_read,
+                            .dst_stage_mask = .{
+                                .fragment_shader_bit = true,
+                            },
+                            .dst_access_mask = .{
+                                .depth_stencil_attachment_read_bit = true,
+                            },
+                            .src_queue_family_index = 0,
+                            .dst_queue_family_index = 0,
+                            .subresource_range = .{
+                                .aspect_mask = .{
+                                    .depth_bit = true,
                                 },
+                                .base_array_layer = 0,
+                                .base_mip_level = 0,
+                                .layer_count = 1,
+                                .level_count = 1,
                             },
                         },
-                        .image_layout = .color_attachment_optimal,
-                        .resolve_mode = .{},
-                        .load_op = .clear,
-                        .store_op = .store,
-                        .resolve_image_layout = .undefined,
-                    }),
-                });
+                        vk.ImageMemoryBarrier2{
+                            .image = geometry.image,
+                            .src_stage_mask = .{
+                                .color_attachment_output_bit = true,
+                            },
+                            .src_access_mask = .{
+                                .color_attachment_write_bit = true,
+                            },
+                            .old_layout = .rendering_local_read,
+                            .new_layout = .rendering_local_read,
+                            .dst_stage_mask = .{
+                                .fragment_shader_bit = true,
+                            },
+                            .dst_access_mask = .{
+                                .color_attachment_read_bit = true,
+                            },
+                            .src_queue_family_index = 0,
+                            .dst_queue_family_index = 0,
+                            .subresource_range = .{
+                                .aspect_mask = .{
+                                    .color_bit = true,
+                                },
+                                .base_array_layer = 0,
+                                .base_mip_level = 0,
+                                .layer_count = 1,
+                                .level_count = 1,
+                            },
+                        },
+                    };
 
-                vkd.cmdSetViewport(command_buffer, 0, 1, @ptrCast(&vk.Viewport{
-                    .x = 0.0,
-                    .y = 0.0,
-                    .width = @floatFromInt(swapchain_extent.width),
-                    .height = @floatFromInt(swapchain_extent.height),
-                    .min_depth = 0.0,
-                    .max_depth = 1.0,
-                }));
+                    vkd.cmdPipelineBarrier2(command_buffer, &vk.DependencyInfo{
+                        .image_memory_barrier_count = image_memory_barriers.len,
+                        .p_image_memory_barriers = &image_memory_barriers,
+                        .dependency_flags = .{
+                            .by_region_bit = true,
+                        },
+                    });
+                }
 
-                vkd.cmdSetScissor(command_buffer, 0, 1, @ptrCast(&vk.Rect2D{
-                    .extent = swapchain_extent,
-                    .offset = offset_zero,
-                }));
-
-                vkd.cmdBindPipeline(
+                cmdBindPipelineAndDescriptors(
+                    pipelines.color,
+                    vkd,
                     command_buffer,
-                    .graphics,
-                    pipelines.lighting.pipeline,
-                );
-
-                vkd.cmdBindDescriptorBuffersEXT(
-                    command_buffer,
-                    1,
-                    @ptrCast(&descriptor_buffer_binding_info),
-                );
-                // descriptor_buffer_binding_info.address += lighting_pipeline_layout_size;
-
-                descriptor_buffer_offsets_info.layout = pipelines.lighting.pipeline_layout;
-                descriptor_buffer_offsets_info.stage_flags = .{
-                    .vertex_bit = true,
-                    .fragment_bit = true,
-                };
-                vkd.cmdSetDescriptorBufferOffsets2EXT(
-                    command_buffer,
-                    &descriptor_buffer_offsets_info,
+                    descriptor_buffer_binding_info,
                 );
 
                 vkd.cmdDraw(command_buffer, 3, 1, 0, 0);
@@ -1845,18 +2085,36 @@ pub fn main() !void {
                 vkd.cmdEndRendering(command_buffer);
             }
 
-            advanceImageBarrier(&swapchain_image_memory_barrier);
-            swapchain_image_memory_barrier.new_layout = .present_src_khr;
-            swapchain_image_memory_barrier.dst_stage_mask = .{
-                .color_attachment_output_bit = true,
-            };
-            swapchain_image_memory_barrier.dst_access_mask = .{};
-
             vkd.cmdPipelineBarrier2(
                 command_buffer,
                 &vk.DependencyInfo{
                     .image_memory_barrier_count = 1,
-                    .p_image_memory_barriers = @ptrCast(&swapchain_image_memory_barrier),
+                    .p_image_memory_barriers = @ptrCast(&vk.ImageMemoryBarrier2{
+                        .image = swapchain_image,
+                        .src_stage_mask = .{
+                            .color_attachment_output_bit = true,
+                        },
+                        .src_access_mask = .{
+                            .color_attachment_write_bit = true,
+                        },
+                        .old_layout = .color_attachment_optimal,
+                        .new_layout = .present_src_khr,
+                        .dst_stage_mask = .{
+                            .color_attachment_output_bit = true,
+                        },
+                        .dst_access_mask = .{},
+                        .src_queue_family_index = 0,
+                        .dst_queue_family_index = 0,
+                        .subresource_range = .{
+                            .aspect_mask = .{
+                                .color_bit = true,
+                            },
+                            .base_array_layer = 0,
+                            .base_mip_level = 0,
+                            .layer_count = 1,
+                            .level_count = 1,
+                        },
+                    }),
                 },
             );
 
@@ -2456,6 +2714,8 @@ const RenderTarget = struct {
         vkd: vk.DeviceWrapper,
         device: vk.Device,
         extent: vk.Extent2D,
+        generate_mips: bool,
+        input_attachment: bool,
         physical_device_memory_properties: vk.PhysicalDeviceMemoryProperties,
     ) !void {
         const is_depth = self.format == .d32_sfloat;
@@ -2467,12 +2727,13 @@ const RenderTarget = struct {
         var memory_requirements: vk.MemoryRequirements2 = .{
             .memory_requirements = undefined,
         };
-        const create_info = vk.ImageCreateInfo{
+        var create_info = vk.ImageCreateInfo{
             .format = self.format,
             .usage = .{
                 .sampled_bit = true,
                 .depth_stencil_attachment_bit = is_depth,
                 .color_attachment_bit = !is_depth,
+                .input_attachment_bit = input_attachment,
             },
             .array_layers = 1,
             .extent = .{
@@ -2483,7 +2744,10 @@ const RenderTarget = struct {
             .flags = .{},
             .image_type = .@"2d",
             .initial_layout = .undefined,
-            .mip_levels = 1,
+            .mip_levels = if (generate_mips) @max(
+                log2_int(u32, extent.width),
+                log2_int(u32, extent.height),
+            ) + 1 else 1,
             .queue_family_index_count = 1,
             .p_queue_family_indices = &[_]u32{0},
             .samples = .{
@@ -2649,7 +2913,7 @@ const Buffer = struct {
 
     const Self = @This();
 
-    fn init(
+    fn create(
         vkd: vk.DeviceWrapper,
         device: vk.Device,
         physical_device_memory_properties: vk.PhysicalDeviceMemoryProperties,
@@ -2744,7 +3008,7 @@ const Buffer = struct {
     }
 };
 
-fn cmdPipelineImageMemoryBarrier(
+fn cmdPipelineImageMemoryBarrierAndAdvanceImageMemoryBarriers(
     vkd: vk.DeviceWrapper,
     command_buffer: vk.CommandBuffer,
     targets: anytype,
@@ -2764,86 +3028,47 @@ fn cmdPipelineImageMemoryBarrier(
     }
 }
 
-fn DescriptorBufferOffsets(comptime passes: anytype) type {
-    const Type = std.builtin.Type;
-    const passes_fields = @typeInfo(@TypeOf(passes)).@"struct".fields;
-    var out_passes_fields: [passes_fields.len]Type.StructField = undefined;
-    for (&out_passes_fields, passes_fields) |*out_passes_field, passes_field| {
-        const pass = @field(passes, passes_field.name);
-        const pass_fields = @typeInfo(passes_field.type).@"struct".fields;
-        var out_pass_fields: [pass_fields.len]std.builtin.Type.StructField = undefined;
-        for (&out_pass_fields, pass_fields) |*out_pass_field, pass_field| {
-            out_pass_field.* = std.builtin.Type.StructField{
-                .alignment = @alignOf(vk.DeviceSize),
-                .default_value_ptr = null,
-                .is_comptime = false,
-                .name = pass_field.name,
-                .type = struct {
-                    value: vk.DeviceSize,
-                    const @"type": vk.DescriptorType = @field(pass, pass_field.name);
-                },
-            };
-        }
-
-        out_passes_field.default_value_ptr = null;
-        out_passes_field.is_comptime = false;
-        out_passes_field.name = passes_field.name;
-        out_passes_field.type = @Type(.{ .@"struct" = std.builtin.Type.Struct{
-            .backing_integer = null,
-            .decls = &[_]std.builtin.Type.Declaration{},
-            .fields = &out_pass_fields,
-            .is_tuple = false,
-            .layout = .auto,
-        } });
-        out_passes_field.alignment = @alignOf(out_passes_field.type);
-    }
-
-    return @Type(.{ .@"struct" = std.builtin.Type.Struct{
-        .backing_integer = null,
-        .decls = &[_]std.builtin.Type.Declaration{},
-        .fields = &out_passes_fields,
-        .is_tuple = false,
-        .layout = .auto,
-    } });
-}
-
-fn initDescriptorBufferOffsets(
-    comptime T: type,
-    properties: vk.PhysicalDeviceDescriptorBufferPropertiesEXT,
-) T {
-    var stages: T = undefined;
-    const stages_fields = @typeInfo(T).@"struct".fields;
-
-    var offset: vk.DeviceSize = 0;
-    inline for (stages_fields) |stages_field| {
-        const stage = &@field(stages, stages_field.name);
-        const stage_fields = @typeInfo(stages_field.type).@"struct".fields;
-        inline for (stage_fields) |stage_field| {
-            @field(stage.*, stage_field.name).value = offset;
-
-            offset += descriptorTypeToSize(
-                @TypeOf(@field(stage.*, stage_field.name)).type,
-                properties,
-            );
-        }
-    }
-    return stages;
-}
-
 fn Pipelines(comptime passes: anytype) type {
     const Type = std.builtin.Type;
     const passes_fields = @typeInfo(@TypeOf(passes)).@"struct".fields;
     var out_passes_fields: [passes_fields.len]Type.StructField = undefined;
     for (&out_passes_fields, passes_fields) |*out_passes_field, passes_field| {
+        const pass = @field(passes, passes_field.name);
+
+        const descriptors_fields = @typeInfo(@TypeOf(pass.descriptors)).@"struct".fields;
+        var out_descriptors_fields: [descriptors_fields.len]std.builtin.Type.StructField = undefined;
+        for (&out_descriptors_fields, descriptors_fields) |*out_descriptors_field, descriptors_field| {
+            out_descriptors_field.* = std.builtin.Type.StructField{
+                .alignment = @alignOf(vk.DeviceSize),
+                .default_value_ptr = null,
+                .is_comptime = false,
+                .name = descriptors_field.name,
+                .type = struct {
+                    offset: vk.DeviceSize,
+                    const descriptor_type: vk.DescriptorType = @field(pass.descriptors, descriptors_field.name);
+                },
+            };
+        }
+
+        const Descriptors = @Type(.{ .@"struct" = std.builtin.Type.Struct{
+            .backing_integer = null,
+            .decls = &[_]std.builtin.Type.Declaration{},
+            .fields = &out_descriptors_fields,
+            .is_tuple = false,
+            .layout = .auto,
+        } });
+
         out_passes_field.default_value_ptr = null;
         out_passes_field.is_comptime = false;
         out_passes_field.name = passes_field.name;
         out_passes_field.type = struct {
             descriptor_set_layout: vk.DescriptorSetLayout,
-            descriptor_memory_offset: vk.DeviceSize,
+            descriptor_bind_param: vk.DeviceSize,
+            descriptors: Descriptors,
             pipeline_layout: vk.PipelineLayout,
             pipeline: vk.Pipeline,
-            const stage_flags: vk.ShaderStageFlags = @field(passes, passes_field.name);
+
+            const descriptor_set_layout_stage: vk.ShaderStageFlags = pass.descriptor_set_layout_stage;
         };
         out_passes_field.alignment = @alignOf(out_passes_field.type);
     }
@@ -2859,35 +3084,39 @@ fn Pipelines(comptime passes: anytype) type {
 
 fn createPipelines(
     comptime T: type,
-    comptime descriptor_types_list: anytype,
-    pipeline_create_infos: anytype,
+    create_infos: anytype,
     vkd: vk.DeviceWrapper,
     device: vk.Device,
+    properties: vk.PhysicalDeviceDescriptorBufferPropertiesEXT,
 ) !T {
     var pipelines: T = undefined;
-    const descriptor_types_list_fields = @typeInfo(@TypeOf(descriptor_types_list)).@"struct".fields;
     const pipelines_fields = @typeInfo(T).@"struct".fields;
+    var offset: vk.DeviceSize = 0;
 
     var descriptor_memory_offset: vk.DeviceSize = 0;
-    inline for (descriptor_types_list_fields, pipelines_fields) |descriptor_types_list_field, pipelines_field| {
-        const descriptor_types = @field(descriptor_types_list, descriptor_types_list_field.name);
-        const descriptor_types_fields = @typeInfo(descriptor_types_list_field.type).@"struct".fields;
-        var bindings: [descriptor_types_fields.len]vk.DescriptorSetLayoutBinding = undefined;
-        inline for (descriptor_types_fields, 0..) |descriptor_types_field, binding| {
+    inline for (pipelines_fields) |pipelines_field| {
+        const pipeline = &@field(pipelines, pipelines_field.name);
+        pipeline.descriptor_bind_param = offset;
+
+        const descriptors_fields = @typeInfo(@TypeOf(pipeline.descriptors)).@"struct".fields;
+
+        var bindings: [descriptors_fields.len]vk.DescriptorSetLayoutBinding = undefined;
+        inline for (descriptors_fields, 0..) |descriptors_field, binding| {
             bindings[binding] = vk.DescriptorSetLayoutBinding{
                 .binding = binding,
                 .descriptor_count = 1,
-                .descriptor_type = @field(descriptor_types, descriptor_types_field.name),
-                .stage_flags = pipelines_field.type.stage_flags,
+                .descriptor_type = descriptors_field.type.descriptor_type,
+                .stage_flags = pipelines_field.type.descriptor_set_layout_stage,
             };
-        }
+            @field(pipeline.descriptors, descriptors_field.name).offset = offset;
 
-        const pipeline = &@field(pipelines, pipelines_field.name);
+            offset += descriptorTypeToSize(descriptors_field.type.descriptor_type, properties);
+        }
 
         pipeline.descriptor_set_layout = try vkd.createDescriptorSetLayout(
             device,
             &vk.DescriptorSetLayoutCreateInfo{
-                .binding_count = descriptor_types_fields.len,
+                .binding_count = descriptors_fields.len,
                 .p_bindings = &bindings,
                 .flags = .{
                     .descriptor_buffer_bit_ext = true,
@@ -2904,7 +3133,7 @@ fn createPipelines(
             null,
         );
         var create_info: vk.GraphicsPipelineCreateInfo = @field(
-            pipeline_create_infos,
+            create_infos,
             pipelines_field.name,
         );
         create_info.layout = pipeline.pipeline_layout;
@@ -2917,8 +3146,6 @@ fn createPipelines(
             null,
             @ptrCast(&pipeline.pipeline),
         );
-
-        pipeline.descriptor_memory_offset = descriptor_memory_offset;
 
         descriptor_memory_offset += vkd.getDescriptorSetLayoutSizeEXT(
             device,
@@ -2955,13 +3182,46 @@ fn destroyPipelines(
     }
 }
 
+fn cmdBindPipelineAndDescriptors(
+    pipeline: anytype,
+    vkd: vk.DeviceWrapper,
+    command_buffer: vk.CommandBuffer,
+    descriptor_buffer_binding_info: vk.DescriptorBufferBindingInfoEXT,
+) void {
+    vkd.cmdBindPipeline(
+        command_buffer,
+        .graphics,
+        pipeline.pipeline,
+    );
+
+    vkd.cmdBindDescriptorBuffersEXT(
+        command_buffer,
+        1,
+        @ptrCast(&descriptor_buffer_binding_info),
+    );
+
+    vkd.cmdSetDescriptorBufferOffsets2EXT(
+        command_buffer,
+        &vk.SetDescriptorBufferOffsetsInfoEXT{
+            .first_set = 0,
+            .set_count = 1,
+            .layout = pipeline.pipeline_layout,
+            .p_buffer_indices = &[_]u32{0},
+            .p_offsets = &[_]vk.DeviceSize{pipeline.descriptor_bind_param},
+            .stage_flags = @TypeOf(pipeline).descriptor_set_layout_stage,
+        },
+    );
+}
+
 fn descriptorTypeToSize(
     descriptor_type: vk.DescriptorType,
     properties: vk.PhysicalDeviceDescriptorBufferPropertiesEXT,
 ) vk.DeviceSize {
     return switch (descriptor_type) {
-        vk.DescriptorType.uniform_buffer => properties.uniform_buffer_descriptor_size,
-        vk.DescriptorType.combined_image_sampler => properties.combined_image_sampler_descriptor_size,
+        .uniform_buffer => properties.uniform_buffer_descriptor_size,
+        .combined_image_sampler => properties.combined_image_sampler_descriptor_size,
+        .sampled_image => properties.sampled_image_descriptor_size,
+        .input_attachment => properties.input_attachment_descriptor_size,
         else => @panic("unsupported descriptor type"),
     };
 }
@@ -2974,11 +3234,14 @@ fn getDescriptor(
     data: anytype,
     memory_mapped: [*]u8,
 ) void {
-    const @"type": vk.DescriptorType = @TypeOf(descriptor).type;
-    if (@TypeOf(data) != switch (@"type") {
-        vk.DescriptorType.uniform_buffer => vk.DescriptorAddressInfoEXT,
-        vk.DescriptorType.combined_image_sampler => vk.DescriptorImageInfo,
-        else => @panic("unsupported type"),
+    const descriptor_type: vk.DescriptorType = @TypeOf(descriptor).descriptor_type;
+
+    if (@TypeOf(data) != switch (descriptor_type) {
+        .uniform_buffer => vk.DescriptorAddressInfoEXT,
+        .combined_image_sampler => vk.DescriptorImageInfo,
+        .sampled_image => vk.DescriptorImageInfo,
+        .input_attachment => vk.DescriptorImageInfo,
+        else => @compileError("unsupported type"),
     }) {
         @compileError("mismatched descriptor types");
     }
@@ -2986,18 +3249,24 @@ fn getDescriptor(
     vkd.getDescriptorEXT(
         device,
         &vk.DescriptorGetInfoEXT{
-            .type = @TypeOf(descriptor).type,
-            .data = switch (@"type") {
-                vk.DescriptorType.uniform_buffer => vk.DescriptorDataEXT{
+            .type = @TypeOf(descriptor).descriptor_type,
+            .data = switch (descriptor_type) {
+                .uniform_buffer => vk.DescriptorDataEXT{
                     .p_uniform_buffer = &data,
                 },
-                vk.DescriptorType.combined_image_sampler => vk.DescriptorDataEXT{
+                .combined_image_sampler => vk.DescriptorDataEXT{
                     .p_combined_image_sampler = &data,
+                },
+                .sampled_image => vk.DescriptorDataEXT{
+                    .p_sampled_image = &data,
+                },
+                .input_attachment => vk.DescriptorDataEXT{
+                    .p_input_attachment_image = &data,
                 },
                 else => @panic("unsupported type"),
             },
         },
-        descriptorTypeToSize(@TypeOf(descriptor).type, properties),
-        memory_mapped + descriptor.value,
+        descriptorTypeToSize(descriptor_type, properties),
+        memory_mapped + descriptor.offset,
     );
 }

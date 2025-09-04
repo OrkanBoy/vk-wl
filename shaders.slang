@@ -98,8 +98,6 @@ VSOutput vertexShadow(VSInput input, uint vertex_id: SV_VertexID) {
 namespace geometry {
 [vk_binding(0)]
 ConstantBuffer<Uniform> uniform;
-[vk_binding(1)]
-StructuredBuffer<Voxel> voxels;
 
 struct VSOutput {
   float4 clip_position : SV_Position;
@@ -201,6 +199,11 @@ VSOutput vertexGeometry(VSInput input, uint vertex_id: SV_VertexID) {
   return output;
 }
 
+struct FSOutput {
+  [vk_location(0)]
+  uint2 geometry;
+}
+
 [shader("fragment")]
 uint2 fragmentGeometry(VSOutput input) {
   return uint2(input.surface_direction_signed, bit_cast<uint>(input.ambient));
@@ -209,7 +212,7 @@ uint2 fragmentGeometry(VSOutput input) {
 
 struct FullScreenVSOutput {
   noperspective float4 clip_position : SV_Position;
-  noperspective float2 sample_position;
+  noperspective float2 position;
 }
 
 [shader("vertex")]
@@ -222,33 +225,41 @@ FullScreenVSOutput vertexFullScreen(uint vertex_id: SV_VertexID) {
   };
 
   output.clip_position = { positions[vertex_id], 0.0, 1.0 };
-  output.sample_position = positions[vertex_id] * 0.5 + 0.5;
+  output.position = positions[vertex_id];
   return output;
 }
 
-namespace lighting {
+namespace color {
 
 [vk_binding(0)]
 ConstantBuffer<Uniform> uniform;
 [vk_binding(1)]
-Sampler2DShadow shadow_sampler;
-[vk_binding(2)]
-Sampler2D<float> depth_sampler;
-[vk_binding(3)]
-Sampler2D<uint2> geometry_sampler;
+Sampler2DShadow shadow_combined_image_sampler;
+[vk_input_attachment_index(0),vk_binding(2)]
+SubpassInput<float4> depth_input;
+[vk_input_attachment_index(1),vk_binding(3)]
+SubpassInput<uint4> geometry_input;
+
+struct FSOutput {
+  [vk_location(1)]
+  float3 color;
+  // [vk_location(2)]
+  // float luminance;
+};
 
 [shader("fragment")]
-float3 fragmentLighting(FullScreenVSOutput input) {
-  let depth = depth_sampler.Sample(input.sample_position);
+FSOutput fragmentColor(FullScreenVSOutput input) {
+  let depth = depth_input.SubpassLoad()[0];
   if (depth == 0.0) {
     return { 0.0, 0.0, 0.0 };
   }
+  let geometry = geometry_input.SubpassLoad();
 
   float3 position;
   position[directions - 1] = uniform.camera_near / depth;
 
   for (var direction = 0; direction != directions - 1; direction += 1) {
-    position[direction] = input.sample_position[direction] * 2.0 - 1.0;
+    position[direction] = input.position[direction];
     position[direction] *= position[directions - 1];
     position[direction] /= uniform.camera_scale[direction];
   }
@@ -271,51 +282,43 @@ float3 fragmentLighting(FullScreenVSOutput input) {
   let light_view_position = applyAffine(position, uniform.light_affine);
   let light_view_sample_position = light_view_position.xy / 2.0 + 0.5;
 
-  let diffuse = shadow_sampler.SampleCmp(light_view_sample_position,
+  let diffuse = shadow_combined_image_sampler.SampleCmp(light_view_sample_position,
                                          light_view_position.z, );
-  let ambient =
-      bit_cast<float>(geometry_sampler.Sample(input.sample_position)[1]);
+  let ambient = bit_cast<float>(geometry[1]);
 
-  float3 output;
-
-  var direction_signed = geometry_sampler.Sample(input.sample_position)[0];
+  var direction_signed = geometry[0];
   let direction_unsigned = direction_signed & ((1 << log_directions) - 1);
   direction_signed >>= log_directions;
   let direction_sign = direction_signed & 1;
 
+
+  var output: FSOutput;
+
   for (var direction = 0; direction != directions; direction += 1) {
-    output[direction] =
+    output.color[direction] =
         float(direction_sign ^ (direction != direction_unsigned));
   }
-  const let diffuse_strength : float = 0.2;
-  const let ambient_strength : float = 1.0 - diffuse_strength;
+  const let diffuse_strength : float = 0.3;
+  const let ambient_strength : float = 1 - diffuse_strength;
 
-  output *= diffuse_strength * diffuse + ambient_strength * ambient;
+  output.color *= diffuse_strength * diffuse + ambient_strength * ambient;
+  // output.luminance = log2(dot(output.color, float3(0.2126, 0.7152, 0.0722)));
 
   return output;
 }
 
 }
 
-static const uint morton_mask = 0b001001001001;
-
-uint morton(uint x) {
-  {
-    const uint mask = 0b000000000011;
-    x = (x & mask) | ((x & (mask << 0b10)) << ((directions - 1) << 0b1));
-  }
-  {
-    const uint mask = 0b000001000001;
-    x = (x & mask) | ((x & (mask << 0b1)) << ((directions - 1)));
-  }
-
-  return x;
-}
-
-uint combineIndices(uint3 indices) {
-  var combined_indices : uint = 0;
-  for (var direction: uint = 0; direction != directions; direction += 1) {
-    combined_indices |= morton(indices[direction]) << direction;
-  }
-  return combined_indices;
-}
+// namespace tonemap {
+// [vk_binding(0)]
+// ConstantBuffer<float> luminance;
+// [vk_input_attachment_index(1),vk_binding(1)]
+// SubpassInput<float3> color_input;
+//
+// [shader("fragment")]
+// float3 fragmentTonemap(FullScreenVSOutput input) {
+//
+//   let color = color_input.SubpassLoad();
+//   return color;
+// }
+// }
