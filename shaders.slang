@@ -16,12 +16,6 @@ struct Uniform {
   float2 camera_scale;
 }
 
-typedef uint8_t Voxel;
-enum {
-  AIR = 0,
-  STONE = 1,
-};
-
 vector<T, N> applyAffine<T : __BuiltinFloatingPointType, let N : int>(
     vector<T, N> input, vector<T, N + 1> affine[N], ) {
   vector<T, N> output;
@@ -235,23 +229,29 @@ namespace color {
 ConstantBuffer<Uniform> uniform;
 [vk_binding(1)]
 Sampler2DShadow shadow_combined_image_sampler;
-[vk_input_attachment_index(0),vk_binding(2)]
+[vk_input_attachment_index(0), vk_binding(2)]
 SubpassInput<float4> depth_input;
-[vk_input_attachment_index(1),vk_binding(3)]
+[vk_input_attachment_index(1), vk_binding(3)]
 SubpassInput<uint4> geometry_input;
 
 struct FSOutput {
   [vk_location(1)]
   float3 color;
-  // [vk_location(2)]
-  // float luminance;
+  [vk_location(2)]
+  float luminance;
 };
 
 [shader("fragment")]
 FSOutput fragmentColor(FullScreenVSOutput input) {
+  const float luminance_epsilon = 0.0001;
+
+  var output : FSOutput;
+
   let depth = depth_input.SubpassLoad()[0];
   if (depth == 0.0) {
-    return { 0.0, 0.0, 0.0 };
+    output.color = float3(0.0, 0.0, 0.0);
+    output.luminance = luminance_epsilon;
+    return output;
   }
   let geometry = geometry_input.SubpassLoad();
 
@@ -282,8 +282,8 @@ FSOutput fragmentColor(FullScreenVSOutput input) {
   let light_view_position = applyAffine(position, uniform.light_affine);
   let light_view_sample_position = light_view_position.xy / 2.0 + 0.5;
 
-  let diffuse = shadow_combined_image_sampler.SampleCmp(light_view_sample_position,
-                                         light_view_position.z, );
+  let diffuse = shadow_combined_image_sampler.SampleCmp(
+      light_view_sample_position, light_view_position.z, );
   let ambient = bit_cast<float>(geometry[1]);
 
   var direction_signed = geometry[0];
@@ -291,34 +291,58 @@ FSOutput fragmentColor(FullScreenVSOutput input) {
   direction_signed >>= log_directions;
   let direction_sign = direction_signed & 1;
 
-
-  var output: FSOutput;
-
   for (var direction = 0; direction != directions; direction += 1) {
     output.color[direction] =
         float(direction_sign ^ (direction != direction_unsigned));
   }
-  const let diffuse_strength : float = 0.3;
-  const let ambient_strength : float = 1 - diffuse_strength;
+  const let diffuse_strength : float = 0.8;
+  const let ambient_strength : float = 0.4;
 
   output.color *= diffuse_strength * diffuse + ambient_strength * ambient;
-  // output.luminance = log2(dot(output.color, float3(0.2126, 0.7152, 0.0722)));
+  output.luminance = luminance_epsilon + calculateLuminance(output.color);
 
   return output;
 }
 
 }
 
-// namespace tonemap {
-// [vk_binding(0)]
-// ConstantBuffer<float> luminance;
-// [vk_input_attachment_index(1),vk_binding(1)]
-// SubpassInput<float3> color_input;
-//
-// [shader("fragment")]
-// float3 fragmentTonemap(FullScreenVSOutput input) {
-//
-//   let color = color_input.SubpassLoad();
-//   return color;
-// }
-// }
+namespace exposure_average {
+[vk_binding(0)]
+Texture2D<float> luminance_new;
+[vk_binding(1)]
+RWStructuredBuffer<float> exposure;
+
+[shader("compute"), numthreads(1, 1, 1)]
+void computeExposureAverage() {
+  static const float alpha = 0.1;
+  let exposure_new = 0.18 / luminance_new.Load(int3(0,0,0));
+
+  exposure[0] = (alpha * exposure_new) + ((1.0 - alpha) * exposure[0]);
+
+}
+}
+
+// TODO: improve tonemapping, this is very non physical
+namespace tonemap {
+[vk_binding(0)]
+ConstantBuffer<float> exposure;
+[vk_binding(1)]
+Texture2D<float3> color_image;
+
+[shader("fragment")]
+float3 fragmentTonemap(FullScreenVSOutput input) {
+  let sample_position = int3(int2(input.clip_position.xy), 0);
+  let color = color_image.Load(sample_position);
+  //
+  // let luminance_original = calculateLuminance(color);
+  // let luminance_scaled = exposure[0] * luminance_original;
+  // let luminance_mapped = luminance_scaled / (luminance_scaled + 1.0);
+  //
+  // let sum = color[0] + color[1] + color[2];
+  return (color * exposure) / (color * exposure + 1.0);
+}
+}
+
+float calculateLuminance(float3 color) {
+  return dot(color, float3(0.2126, 0.7152, 0.0722));
+}
