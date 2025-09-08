@@ -1,6 +1,6 @@
 struct VSInput {
   [[vk::location(0)]]
-  uint surface;
+  uint64_t surface;
 };
 struct Uniform {
   float4 light_affine[3];
@@ -28,14 +28,20 @@ vector<T, N> applyAffine<T : __BuiltinFloatingPointType, let N : int>(
   return output;
 }
 
-static const uint log_side_len = 0x4;
+static const uint log_side_len = 0x8;
+static const uint log_lod = uint(ceil(log2(float(log_side_len + 1))));
+static const uint lod_mask = (1 << log_lod) - 1;
 
 static const uint directions = 3;
 
 static const uint log_directions = uint(ceil(log2(float(directions))));
+static const uint unsigned_direction_mask = (1 << log_directions) - 1;
+
 static const uint log_ambient = directions - 1;
-static const uint log_ambients = (1 << (directions - 1)) * (directions - 1);
 static const uint ambient_mask = (1 << log_ambient) - 1;
+
+static const uint log_ambients = (1 << (directions - 1)) * (directions - 1);
+static const uint ambients_mask = (1 << log_ambients) - 1;
 
 namespace shadow {
 [vk_binding(0)]
@@ -61,8 +67,10 @@ VSOutput vertexShadow(VSInput input, uint vertex_id: SV_VertexID) {
   surface >>= log_directions;
   let surface_direction_sign = surface & 1;
   surface >>= 1;
+  let surface_lod = surface & lod_mask;
+  surface >>= log_lod;
 
-  position[surface_direction_unsigned] += float(surface_direction_sign);
+
 
   if (surface_direction_sign == 1) {
     switch (vertex_id) {
@@ -73,10 +81,13 @@ VSOutput vertexShadow(VSInput input, uint vertex_id: SV_VertexID) {
       vertex_id = 0b01;
     }
   }
+
+  position[surface_direction_unsigned] += float(surface_direction_sign << surface_lod);
+
   position[(surface_direction_unsigned + 0b01) % directions] +=
-      float((vertex_id & 0b01) >> 0);
+      float(((vertex_id & 0b01) >> 0) << surface_lod);
   position[(surface_direction_unsigned + 0b10) % directions] +=
-      float((vertex_id & 0b10) >> 1);
+      float(((vertex_id & 0b10) >> 1) << surface_lod);
 
   position = applyAffine(position, uniform.light_affine);
   output.position = {
@@ -113,12 +124,16 @@ VSOutput vertexGeometry(VSInput input, uint vertex_id: SV_VertexID) {
   }
 
   output.surface_direction_signed = surface & ((1 << (log_directions + 1)) - 1);
-  let surface_direction_unsigned = surface & ((1 << log_directions) - 1);
+  let surface_direction_unsigned = surface & unsigned_direction_mask;
   surface >>= log_directions;
   let surface_direction_sign = surface & 1;
   surface >>= 1;
-  let ambients = surface & ((1 << log_ambients) - 1);
+  let surface_lod = surface & lod_mask;
+  surface >>= log_lod;
+  let ambients = surface & ambients_mask;
   surface >>= log_ambients;
+
+
 
   if (surface_direction_sign == 1) {
     switch (vertex_id) {
@@ -155,11 +170,11 @@ VSOutput vertexGeometry(VSInput input, uint vertex_id: SV_VertexID) {
   ambient_sample_indices[surface_direction_unsigned] +=
       surface_direction_sign == 1 ? +1 : -1;
 
-  indices[surface_direction_unsigned] += surface_direction_sign;
+  indices[surface_direction_unsigned] += surface_direction_sign << surface_lod;
   indices[(surface_direction_unsigned + 0b01) % directions] +=
-      (vertex_id & 0b01) >> 0;
+      ((vertex_id & 0b01) >> 0) << surface_lod;
   indices[(surface_direction_unsigned + 0b10) % directions] +=
-      (vertex_id & 0b10) >> 1;
+      ((vertex_id & 0b10) >> 1) << surface_lod;
 
   var position = float3(indices);
 
@@ -295,8 +310,8 @@ FSOutput fragmentColor(FullScreenVSOutput input) {
     output.color[direction] =
         float(direction_sign ^ (direction != direction_unsigned));
   }
-  const let diffuse_strength : float = 0.8;
-  const let ambient_strength : float = 0.4;
+  const let diffuse_strength : float = 0.0;
+  const let ambient_strength : float = 1.0;
 
   output.color *= diffuse_strength * diffuse + ambient_strength * ambient;
   output.luminance = luminance_epsilon + calculateLuminance(output.color);
@@ -333,13 +348,9 @@ Texture2D<float3> color_image;
 float3 fragmentTonemap(FullScreenVSOutput input) {
   let sample_position = int3(int2(input.clip_position.xy), 0);
   let color = color_image.Load(sample_position);
-  //
-  // let luminance_original = calculateLuminance(color);
-  // let luminance_scaled = exposure[0] * luminance_original;
-  // let luminance_mapped = luminance_scaled / (luminance_scaled + 1.0);
-  //
-  // let sum = color[0] + color[1] + color[2];
-  return (color * exposure) / (color * exposure + 1.0);
+
+  return color;
+  // return (color * exposure) / (color * exposure + 1.0);
 }
 }
 

@@ -25,15 +25,18 @@ const Surface = packed struct {
     combined_indices: CombinedIndices,
     direction_unsigned: Direction,
     direction_sign: u1,
+    lod: LogSide,
     ambients: Ambients,
 };
-const CombinedIndices = UnsignedInt(directions * log_side_len);
+const CombinedIndices = UnsignedInt(directions * log_universe_side);
 const Direction = UnsignedInt(log2_int_ceil(usize, directions));
-// array of ambient values for entire surface
-// each ambient value
+const LogSide = UnsignedInt(log2_int_ceil(usize, log_universe_side + 1));
+const LogVolume = UnsignedInt(log2_int_ceil(usize, directions * log_universe_side + 1));
 const Ambients = UnsignedInt((directions - 1) * (1 << (directions - 1)));
 
 const LogUsize = std.math.Log2Int(usize);
+
+const Index = UnsignedInt(log_universe_side);
 
 const clamp = std.math.clamp;
 
@@ -45,15 +48,15 @@ const range_rotate_unit: i32 = @intFromFloat(tau * range_rotate_factor);
 
 const directions = 3;
 
-const log_side_len = 0x4;
-const side_len = 1 << log_side_len;
+const log_universe_side = 0x8;
+const universe_side_len = 1 << log_universe_side;
 
-const log_volume_len = log_side_len * directions;
-const volume_len = 1 << log_volume_len;
+const log_universe_volume_len = log_universe_side * directions;
+const universe_volume_len = 1 << log_universe_volume_len;
 
 const morton_mask: CombinedIndices = _: {
     var value: usize = 0;
-    for (0..log_side_len) |_| {
+    for (0..log_universe_side) |_| {
         value <<= directions;
         value |= 1;
     }
@@ -79,8 +82,6 @@ const Uniform = extern struct {
         cos: [directions - 1]f32,
         sin: [directions - 1]f32,
         scale: [directions - 1]f32,
-
-        far: f32,
     },
 };
 const camera = struct {
@@ -457,9 +458,25 @@ pub fn main() !void {
     );
     defer exposure.destroy(vkd, device);
 
-    const _voxels: []Voxel = try allocator.alloc(Voxel, volume_len);
-    defer allocator.free(_voxels);
-    const voxels: [*]Voxel = _voxels.ptr;
+    // 8^0 + 8^1 + 8^2 + ... + 8^l = (8^(l + 1) - 1) / (8 - 1)
+    const voxel_data: []Voxel = try allocator.alloc(
+        Voxel,
+        ((1 << (directions * (log_universe_side + 1))) - 1) / ((1 << directions) - 1),
+    );
+    defer allocator.free(voxel_data);
+
+    var voxel_tree: [log_universe_side + 1][]Voxel = undefined;
+    {
+        var start: usize = 0;
+        var size: usize = 1 << (directions * log_universe_side);
+        for (0..log_universe_side + 1) |log_side_len| {
+            voxel_tree[log_side_len] = voxel_data[start .. start + size];
+            start += size;
+            size >>= directions;
+        }
+    }
+
+    const voxels: []Voxel = voxel_tree[0];
 
     const log_shadow_side_len = 0xa;
     const shadow_side_len = 1 << log_shadow_side_len;
@@ -1161,23 +1178,23 @@ pub fn main() !void {
         descriptors_mapped,
     );
 
-    for (0..volume_len) |voxel_i| {
+    for (0..universe_volume_len) |voxel_i| {
         var sum: usize = 0;
         for (0..directions) |_direction_i| {
             const direction_i: Direction = @truncate(_direction_i);
             const coord = pext(voxel_i, morton_mask << direction_i);
             sum += coord * coord;
         }
-        const max_sum = 1 << (2 * log_side_len);
+        const max_sum = 1 << (2 * log_universe_side);
         voxels[voxel_i] = if (sum > max_sum) Voxel.Stone else Voxel.Air;
     }
+    updateTree(&voxel_tree);
 
-    // const PartialVoxelId = UnsignedInt(log_side_len);
-    // factor of 2 is completely arbitrary
-    // it's to allow modification of mesh once memory been allocated
-    // TODO: fix, more dynamic voxel set modification, and mesh generation
-    var surfaces_len = computeSurfacesLen(voxels);
-    const surfaces_len_saturated = surfaces_len * 2;
+    // const log_side = 1;
+    // var surfaces_len: usize = countSurfaces(
+    //     voxel_tree[log_side],
+    //     log_side,
+    // );
 
     var surfaces_transfer: Buffer = try Buffer.create(
         vkd,
@@ -1186,7 +1203,7 @@ pub fn main() !void {
         vk.BufferUsageFlags{
             .transfer_src_bit = true,
         },
-        @sizeOf(Surface) * surfaces_len_saturated,
+        @sizeOf(Surface) * maximum_surfaces_len,
         vk.MemoryPropertyFlags{
             .host_visible_bit = true,
         },
@@ -1269,19 +1286,14 @@ pub fn main() !void {
     var frame: u1 = 0;
     var time = nanoTimestamp();
 
-    var camera_speed: f32 = 4.0;
+    var camera_speed: f32 = 10.0;
 
     // var rand = std.Random.DefaultPrng.init(@bitCast(std.time.microTimestamp()));
     // const random = rand.random();
     var light_angle: f32 = 0.0;
 
-    // const side: f32 = (side_len / @sqrt(@as(f32, @floatFromInt(directions))));
-    uniform_mapped.camera.position = [_]f32{-0.5} ** directions;
-
-    voxels[0] = Voxel.Stone;
-    voxels[0b000_010_010_011] = Voxel.Stone;
-
-    var voxel_regenerate = true;
+    const side: f32 = (universe_side_len / @sqrt(@as(f32, @floatFromInt(directions))));
+    uniform_mapped.camera.position = [_]f32{side - 10.0} ** directions;
 
     while (true) {
         if (wl_display.roundtrip() != .SUCCESS) return error.RoundtripFailed;
@@ -1289,6 +1301,7 @@ pub fn main() !void {
         const new_time = nanoTimestamp();
         const dt = @as(f32, @floatFromInt(new_time - time)) / 1_000_000_000.0;
         time = new_time;
+        print("fps: {x}\n", .{@as(usize, @intFromFloat(1.0 / dt))});
 
         light_angle += dt * 0.05;
         light_angle = @max(tau, light_angle);
@@ -1387,6 +1400,7 @@ pub fn main() !void {
                 }
             }
 
+            var update_tree: bool = false;
             if (camera_pointer.create != camera_pointer.destroy) {
                 const origin = uniform_mapped.camera.position;
                 var indices: [directions]usize = undefined;
@@ -1426,7 +1440,7 @@ pub fn main() !void {
                         } else if (old_combined_indices != null) {
                             voxels[old_combined_indices.?] = Voxel.Stone;
                         }
-                        voxel_regenerate = true;
+                        update_tree = true;
                         break;
                     }
                     var t_min: f32 = std.math.inf(f32);
@@ -1439,7 +1453,7 @@ pub fn main() !void {
                         }
                     }
                     if (ray[direction_i_min] > 0.0) {
-                        if (indices[direction_i_min] == side_len - 1) break;
+                        if (indices[direction_i_min] == universe_side_len - 1) break;
                         planes[direction_i_min] += 1.0;
                         indices[direction_i_min] += 1;
                     } else {
@@ -1458,9 +1472,8 @@ pub fn main() !void {
             camera_pointer.create = false;
             camera_pointer.destroy = false;
 
-            if (voxel_regenerate) {
-                surfaces_len = computeSurfacesLen(voxels);
-                generateSurfaces(voxels, surfaces_mapped);
+            if (update_tree) {
+                updateTree(&voxel_tree);
             }
 
             var camera_scale: [directions - 1]f32 = undefined;
@@ -1717,6 +1730,46 @@ pub fn main() !void {
             xdg_toplevel_event = null;
         }
 
+        // surfaces_len = countSurfaces(
+        //     voxel_tree[log_side],
+        //     log_side,
+        // );
+        // generateSurfaces(
+        //     voxel_tree[log_side],
+        //     log_side,
+        //     surfaces_mapped[0..surfaces_len],
+        // );
+        //
+
+        const surfaces_len = countSurfacesOnVoxelTree(
+            &[_]Index{0} ** directions,
+            &voxel_tree,
+            log_universe_side,
+            &uniform_mapped.camera.position,
+        );
+        var surface_i: usize = 0;
+        generateSurfacesOnVoxelTree(
+            surfaces_mapped[0..surfaces_len],
+            &surface_i,
+            &[_]Index{0} ** directions,
+            &voxel_tree,
+            log_universe_side,
+            &uniform_mapped.camera.position,
+        );
+
+        // const previous_surfaces_len = countSurfaces(voxel_tree[0], 0);
+        // print("{x} ~ {x}\n\n", .{ surfaces_len, previous_surfaces_len });
+
+        // surfaces_len = countSurfaces(
+        //     voxel_tree[log_side],
+        //     log_side,
+        // );
+        // generateSurfaces(
+        //     voxel_tree[log_side],
+        //     log_side,
+        //     surfaces_mapped[0..surfaces_len],
+        // );
+
         const descriptor_buffer_binding_info = vk.DescriptorBufferBindingInfoEXT{
             .address = descriptor_buffer_device_address,
             .usage = descriptors.usage,
@@ -1751,23 +1804,19 @@ pub fn main() !void {
         {
             try vkd.beginCommandBuffer(command_buffer, &.{ .flags = .{ .one_time_submit_bit = true } });
 
-            if (voxel_regenerate) {
-                vkd.cmdCopyBuffer2(
-                    command_buffer,
-                    &vk.CopyBufferInfo2{
-                        .src_buffer = surfaces_transfer.buffer,
-                        .dst_buffer = surfaces.buffer,
-                        .region_count = 1,
-                        .p_regions = @ptrCast(&vk.BufferCopy2{
-                            .src_offset = 0,
-                            .dst_offset = 0,
-                            .size = @sizeOf(Surface) * surfaces_len,
-                        }),
-                    },
-                );
-
-                voxel_regenerate = false;
-            }
+            vkd.cmdCopyBuffer2(
+                command_buffer,
+                &vk.CopyBufferInfo2{
+                    .src_buffer = surfaces_transfer.buffer,
+                    .dst_buffer = surfaces.buffer,
+                    .region_count = 1,
+                    .p_regions = @ptrCast(&vk.BufferCopy2{
+                        .src_offset = 0,
+                        .dst_offset = 0,
+                        .size = @sizeOf(Surface) * surfaces_len,
+                    }),
+                },
+            );
 
             vkd.cmdPipelineBarrier2(command_buffer, &vk.DependencyInfo{
                 .buffer_memory_barrier_count = 1,
@@ -1876,7 +1925,7 @@ pub fn main() !void {
                 vkd.cmdDraw(
                     command_buffer,
                     4,
-                    surfaces_len,
+                    @truncate(surfaces_len),
                     0,
                     0,
                 );
@@ -2145,7 +2194,13 @@ pub fn main() !void {
                     @ptrCast(&@as(vk.DeviceSize, 0)),
                 );
 
-                vkd.cmdDraw(command_buffer, 4, surfaces_len, 0, 0);
+                vkd.cmdDraw(
+                    command_buffer,
+                    4,
+                    @truncate(surfaces_len),
+                    0,
+                    0,
+                );
 
                 {
                     const image_memory_barriers = [_]vk.ImageMemoryBarrier2{
@@ -2825,18 +2880,42 @@ fn findMemoryTypeIndex(
 
 inline fn pdep(src: anytype, mask: @TypeOf(src)) @TypeOf(src) {
     const T = @TypeOf(src);
-    if (T != u64 and T != u32 and T != usize) {
-        @compileError("pdep only implemented for u32 and u64");
-    }
+    const bits = @typeInfo(T).int.bits;
+    const PadT =
+        if (bits <= 32)
+            u32
+        else if (bits <= 64)
+            u64
+        else
+            @compileError("pdep only implemented for u32 and u64");
+
+    return @truncate(pdep_internal(@as(PadT, src), @as(PadT, mask)));
+}
+
+inline fn pdep_internal(src: anytype, mask: @TypeOf(src)) @TypeOf(src) {
     return asm volatile ("pdep %[mask], %[src], %[dst]"
         // Map to actual registers:
-        : [dst] "=r" (-> T),
+        : [dst] "=r" (-> @TypeOf(src)),
         : [src] "r" (src),
           [mask] "r" (mask),
     );
 }
 
 inline fn pext(src: anytype, mask: @TypeOf(src)) @TypeOf(src) {
+    const T = @TypeOf(src);
+    const bits = @typeInfo(T).int.bits;
+    const PadT =
+        if (bits <= 32)
+            u32
+        else if (bits <= 64)
+            u64
+        else
+            @compileError("pdep only implemented for u32 and u64");
+
+    return @truncate(pext_internal(@as(PadT, src), @as(PadT, mask)));
+}
+
+inline fn pext_internal(src: anytype, mask: @TypeOf(src)) @TypeOf(src) {
     const T = @TypeOf(src);
     if (T != u64 and T != u32 and T != usize) {
         @compileError("pext only implemented for u32 and u64");
@@ -2856,108 +2935,350 @@ fn UnsignedInt(bits: comptime_int) type {
     } });
 }
 
-fn computeSurfacesLen(voxels: [*]const Voxel) u32 {
-    var surfaces_len: u32 = 0;
-    for (0..volume_len) |voxel_i| {
-        if (voxels[voxel_i] == Voxel.Air) {
-            continue;
-        }
-        for (0..directions) |_direction_i| {
-            const direction_i: Direction = @truncate(_direction_i);
-            const mask = morton_mask << direction_i;
-            const coord = pext(voxel_i, mask);
-            const cleaned_voxel_i = voxel_i & ~mask;
+fn printVoxels(voxels: []const Voxel) void {
+    for (voxels) |voxel| {
+        print("{s}", .{if (voxel == Voxel.Stone) "#" else "~"});
+    }
+    print("\n", .{});
+}
 
-            if (coord == 0 or
-                voxels[cleaned_voxel_i | pdep(coord - 1, mask)] == Voxel.Air)
-            {
-                surfaces_len += 1;
+fn printIndices(indices: *const [directions]Index) void {
+    for (indices) |index| {
+        print("{x} ", .{index});
+    }
+    print("\n", .{});
+}
+
+fn updateTree(voxel_tree: *const [log_universe_side + 1][]Voxel) void {
+    for (1..log_universe_side + 1) |log_side_len| {
+        for (0..voxel_tree[log_side_len].len) |index| {
+            voxel_tree[log_side_len][index] = Voxel.Stone;
+            for (0..1 << directions) |sub_index| {
+                if (Voxel.Air == voxel_tree[log_side_len - 1][(index << directions) | sub_index]) {
+                    voxel_tree[log_side_len][index] = Voxel.Air;
+                    break;
+                }
             }
-            if (coord == side_len - 1 or
-                voxels[cleaned_voxel_i | pdep(coord + 1, mask)] == Voxel.Air)
-            {
-                surfaces_len += 1;
-            }
+        }
+    }
+}
+
+const radius_0: f32 = 10.0;
+
+fn countSurfacesOnVoxel(
+    indices: *const [directions]Index,
+    voxels: []const Voxel,
+    log_distance_len: LogSide,
+) usize {
+    const index_range = @as(usize, 1) << (log_universe_side - log_distance_len);
+    var combined_indices: CombinedIndices = 0;
+    for (0..directions) |_direction| {
+        const direction: Direction = @truncate(_direction);
+        const index: CombinedIndices = indices[direction];
+        combined_indices |= pdep(index, morton_mask) << direction;
+    }
+
+    if (voxels[combined_indices] == Voxel.Air) {
+        return 0;
+    }
+
+    var surfaces_len: usize = 0;
+    for (0..directions) |_direction| {
+        const direction: Direction = @truncate(_direction);
+        const mask = morton_mask << direction;
+        const index: CombinedIndices = indices[direction];
+        const cleaned = combined_indices & ~mask;
+
+        if (index == 0 or
+            voxels[cleaned | pdep(index - 1, mask)] == Voxel.Air)
+        {
+            surfaces_len += 1;
+        }
+        if (index == index_range - 1 or
+            voxels[cleaned | pdep(index + 1, mask)] == Voxel.Air)
+        {
+            surfaces_len += 1;
         }
     }
     return surfaces_len;
 }
 
-fn generateSurfaces(voxels: [*]const Voxel, surfaces: [*]Surface) void {
-    var surface_i: usize = 0;
-    for (0..volume_len) |voxel_i| {
-        if (voxels[voxel_i] == Voxel.Air) {
-            continue;
-        }
+fn countSurfacesOnVoxelTree(
+    indices: *const [directions]Index,
+    voxel_tree: *const [log_universe_side + 1][]const Voxel,
+    log_side_len: LogSide,
+    camera_position: *const [directions]f32,
+) usize {
+    if (log_side_len == 0) {
+        return countSurfacesOnVoxel(
+            indices,
+            voxel_tree[log_side_len],
+            log_side_len,
+        );
+    }
 
-        var combined_indices: CombinedIndices = 0;
-        for (0..directions) |_direction_i| {
-            const direction_i: Direction = @truncate(_direction_i);
-            combined_indices <<= log_side_len;
-            combined_indices |= @truncate(pext(voxel_i, morton_mask << direction_i));
-        }
+    const radius: f32 = radius_0 * @as(f32, @floatFromInt(@as(usize, 1) << log_side_len));
+    const distance_squared: f32 = pointToCubeSquaredDistance(
+        camera_position,
+        indices,
+        log_side_len,
+    );
+    if (radius * radius < distance_squared) {
+        return countSurfacesOnVoxel(
+            indices,
+            voxel_tree[log_side_len],
+            log_side_len,
+        );
+    }
+
+    var surfaces_len: usize = 0;
+    for (0..1 << directions) |sub_cube| {
+        var sub_indices: [directions]Index = undefined;
         for (0..directions) |_direction| {
             const direction: Direction = @truncate(_direction);
-            const mask = morton_mask << direction;
-            const coord = pext(voxel_i, mask);
+            sub_indices[direction] = indices[direction] << 1;
+            if ((sub_cube >> direction) & 1 == 1) {
+                sub_indices[direction] |= 1;
+            }
+        }
+        surfaces_len += countSurfacesOnVoxelTree(
+            &sub_indices,
+            voxel_tree,
+            log_side_len - 1,
+            camera_position,
+        );
+    }
 
-            const cleaned_voxel_i = voxel_i & ~mask;
+    return surfaces_len;
+}
 
-            {
-                var surface = Surface{
-                    .direction_sign = 0,
-                    .direction_unsigned = direction,
-                    .combined_indices = combined_indices,
-                    .ambients = undefined,
-                };
-                if (coord == 0) {
-                    surface.ambients = std.math.maxInt(Ambients);
-                    surfaces[surface_i] = surface;
-                    surface_i += 1;
-                } else {
-                    const air_voxel_i = cleaned_voxel_i | pdep(coord - 1, mask);
-                    if (voxels[air_voxel_i] == Voxel.Air) {
-                        surface.ambients = computeAmbients(
-                            voxels,
-                            air_voxel_i,
-                            direction,
-                        );
-                        surfaces[surface_i] = surface;
-                        surface_i += 1;
-                    }
+fn pointToCubeSquaredDistance(
+    point: *const [directions]f32,
+    cube_indices: *const [directions]Index,
+    cube_log_side_len: LogSide,
+) f32 {
+    var sum: f32 = 0.0;
+    const cube_radius: f32 = 0.5 * @as(f32, @floatFromInt(@as(usize, 1) << cube_log_side_len));
+    for (0..directions) |direction| {
+        const cube_index_float: f32 = @floatFromInt(@as(usize, cube_indices[direction]) << cube_log_side_len);
+        const difference = @abs(point[direction] - (cube_index_float + cube_radius)) - cube_radius;
+        sum += difference * difference;
+    }
+    return sum;
+}
+
+const maximum_surfaces_len = countFractionOfMaximumSurfaces(
+    &[_]Index{0} ** directions,
+    log_universe_side - 1,
+) << directions;
+
+fn countFractionOfMaximumSurfaces(
+    indices: *const [directions]Index,
+    log_side: LogSide,
+) usize {
+    @setEvalBranchQuota(directions * (1 << (directions * log_universe_side)));
+
+    if (log_side == 0) {
+        return directions << 1;
+    }
+
+    const radius: f32 = radius_0 * @as(f32, @floatFromInt(@as(usize, 1) << log_side));
+    var distance_squared: f32 = 0.0;
+    for (0..directions) |direction| {
+        const distance: f32 = @floatFromInt(@as(usize, indices[direction]) << log_side);
+        distance_squared += distance * distance;
+    }
+    if (radius * radius < distance_squared) {
+        return directions << 1;
+    }
+
+    var surfaces_len: usize = 0;
+    for (0..1 << directions) |sub_cube| {
+        var sub_indices: [directions]Index = undefined;
+        for (0..directions) |_direction| {
+            const direction: Direction = @truncate(_direction);
+            sub_indices[direction] = indices[direction] << 1;
+            if ((sub_cube >> direction) & 1 == 1) {
+                sub_indices[direction] |= 1;
+            }
+        }
+        surfaces_len += countFractionOfMaximumSurfaces(
+            &sub_indices,
+            log_side - 1,
+        );
+    }
+
+    return surfaces_len;
+}
+
+fn generateSurfacesOnVoxel(
+    surfaces: []Surface,
+    surface_i: *usize,
+    indices: *const [directions]Index,
+    voxels: []const Voxel,
+    log_distance: LogSide,
+) void {
+    const max_index = (@as(usize, 1) << (log_universe_side - log_distance)) - 1;
+    var morton_indices: CombinedIndices = 0;
+    var row_major_indices: CombinedIndices = 0;
+    for (0..directions) |_direction| {
+        const direction: Direction = @truncate(_direction);
+        const index: CombinedIndices = indices[direction];
+
+        morton_indices |= pdep(index, morton_mask) << direction;
+
+        row_major_indices <<= log_universe_side;
+        row_major_indices |= index << log_distance;
+    }
+
+    if (voxels[morton_indices] == Voxel.Air) {
+        return;
+    }
+
+    for (0..directions) |_direction| {
+        const direction: Direction = @truncate(_direction);
+        const mask = morton_mask << direction;
+        const index: CombinedIndices = indices[direction];
+        const cleaned_combined_indices = morton_indices & ~mask;
+
+        {
+            // const surface: Surface = .{
+            //     .combined_indices = row_major_indices,
+            //     .direction_unsigned = direction,
+            //     .direction_sign = 0,
+            //     .lod = log_distance,
+            //     .ambients = undefined,
+            // };
+            // surfaces[surface_i.*] = surface;
+            // surface_i.* += 1;
+
+            var surface: Surface = .{
+                .combined_indices = row_major_indices,
+                .direction_unsigned = direction,
+                .direction_sign = 0,
+                .lod = log_distance,
+                .ambients = undefined,
+            };
+
+            if (index == 0) {
+                surface.ambients = std.math.maxInt(Ambients);
+                surfaces[surface_i.*] = surface;
+                surface_i.* += 1;
+            } else {
+                const air_combined_indices = cleaned_combined_indices | pdep(index - 1, mask);
+                if (voxels[air_combined_indices] == Voxel.Air) {
+                    surface.ambients = computeAmbients(
+                        voxels,
+                        max_index,
+                        air_combined_indices,
+                        direction,
+                    );
+                    surfaces[surface_i.*] = surface;
+                    surface_i.* += 1;
                 }
             }
-            {
-                var surface = Surface{
-                    .direction_sign = 1,
-                    .direction_unsigned = direction,
-                    .combined_indices = combined_indices,
-                    .ambients = 0,
-                };
-                if (coord == side_len - 1) {
-                    surface.ambients = std.math.maxInt(Ambients);
-                    surfaces[surface_i] = surface;
-                    surface_i += 1;
-                } else {
-                    const air_voxel_i = cleaned_voxel_i | pdep(coord + 1, mask);
-                    if (voxels[air_voxel_i] == Voxel.Air) {
-                        surface.ambients = computeAmbients(
-                            voxels,
-                            air_voxel_i,
-                            direction,
-                        );
-                        surfaces[surface_i] = surface;
-                        surface_i += 1;
-                    }
+        }
+
+        {
+            // const surface: Surface = .{
+            //     .combined_indices = row_major_indices,
+            //     .direction_unsigned = direction,
+            //     .direction_sign = 1,
+            //     .lod = log_distance,
+            //     .ambients = undefined,
+            // };
+            // surfaces[surface_i.*] = surface;
+            // surface_i.* += 1;
+
+            var surface: Surface = .{
+                .combined_indices = row_major_indices,
+                .direction_unsigned = direction,
+                .direction_sign = 1,
+                .lod = log_distance,
+                .ambients = undefined,
+            };
+
+            if (index == max_index) {
+                surface.ambients = std.math.maxInt(Ambients);
+                surfaces[surface_i.*] = surface;
+                surface_i.* += 1;
+            } else {
+                const air_combined_indices = cleaned_combined_indices | pdep(index + 1, mask);
+                if (voxels[air_combined_indices] == Voxel.Air) {
+                    surface.ambients = computeAmbients(
+                        voxels,
+                        max_index,
+                        air_combined_indices,
+                        direction,
+                    );
+                    surfaces[surface_i.*] = surface;
+                    surface_i.* += 1;
                 }
             }
         }
     }
 }
 
+fn generateSurfacesOnVoxelTree(
+    surfaces: []Surface,
+    surface_i: *usize,
+    indices: *const [directions]Index,
+    voxel_tree: *const [log_universe_side + 1][]const Voxel,
+    log_side_len: LogSide,
+    camera_position: *const [directions]f32,
+) void {
+    if (log_side_len == 0) {
+        generateSurfacesOnVoxel(
+            surfaces,
+            surface_i,
+            indices,
+            voxel_tree[log_side_len],
+            log_side_len,
+        );
+        return;
+    }
+
+    const radius: f32 = radius_0 * @as(f32, @floatFromInt(@as(usize, 1) << log_side_len));
+    const distance_squared: f32 = pointToCubeSquaredDistance(
+        camera_position,
+        indices,
+        log_side_len,
+    );
+    if (radius * radius < distance_squared) {
+        generateSurfacesOnVoxel(
+            surfaces,
+            surface_i,
+            indices,
+            voxel_tree[log_side_len],
+            log_side_len,
+        );
+        return;
+    }
+
+    for (0..1 << directions) |sub_cube| {
+        var sub_indices: [directions]Index = undefined;
+        for (0..directions) |_direction| {
+            const direction: Direction = @truncate(_direction);
+            sub_indices[direction] = indices[direction] << 1;
+            if ((sub_cube >> direction) & 1 == 1) {
+                sub_indices[direction] |= 1;
+            }
+        }
+        generateSurfacesOnVoxelTree(
+            surfaces,
+            surface_i,
+            &sub_indices,
+            voxel_tree,
+            log_side_len - 1,
+            camera_position,
+        );
+    }
+}
+
 fn computeAmbients(
-    voxels: [*]const Voxel,
-    voxel_i: usize,
+    voxels: []const Voxel,
+    max_index: usize,
+    voxel_i: usize, // indices: *const [directions]Index,
     direction_unsigned: Direction,
 ) Ambients {
     var ambients: Ambients = 0;
@@ -2971,7 +3292,7 @@ fn computeAmbients(
             const bit = (corner >> @truncate(direction_offset)) & 1;
 
             if ((bit == 0 and (coord == 0 or voxels[cleaned_voxel_i | pdep(coord - 1, mask)] == Voxel.Air)) or
-                (bit == 1 and (coord == side_len - 1 or voxels[cleaned_voxel_i | pdep(coord + 1, mask)] == Voxel.Air)))
+                (bit == 1 and (coord == max_index or voxels[cleaned_voxel_i | pdep(coord + 1, mask)] == Voxel.Air)))
             {
                 ambient += 1;
             }
@@ -2991,7 +3312,7 @@ fn computeAmbients(
                     }
                     sample_voxel_i |= pdep(coord - 1, mask);
                 } else if (bit == 1) {
-                    if (coord == side_len - 1) {
+                    if (coord == max_index) {
                         ambient += 1;
                         break :diagonal;
                     }
@@ -3005,6 +3326,129 @@ fn computeAmbients(
         ambients |= ambient << @truncate(corner * (directions - 1));
     }
     return ambients;
+}
+
+fn countSurfaces(
+    voxels: []const Voxel,
+    log_side: LogSide,
+) usize {
+    const max_index = (@as(CombinedIndices, 1) << (log_universe_side - log_side)) - 1;
+    var surfaces_len: usize = 0;
+
+    const max_combined_indices: usize = @as(usize, 1) <<
+        (@as(LogUsize, directions) * (@as(LogUsize, log_universe_side) - @as(LogUsize, log_side)));
+
+    for (0..max_combined_indices) |_morton_indices| {
+        const morton_indices: CombinedIndices = @truncate(_morton_indices);
+
+        if (voxels[morton_indices] == Voxel.Air) {
+            continue;
+        }
+        for (0..directions) |_direction_i| {
+            const direction_i: Direction = @truncate(_direction_i);
+
+            const mask = morton_mask << direction_i;
+            const index: CombinedIndices = pext(morton_indices, mask);
+            const cleaned_combined_indices = morton_indices & ~mask;
+
+            if (index == 0 or
+                voxels[cleaned_combined_indices | pdep(index - 1, mask)] == Voxel.Air)
+            {
+                surfaces_len += 1;
+            }
+            if (index == max_index or
+                voxels[cleaned_combined_indices | pdep(index + 1, mask)] == Voxel.Air)
+            {
+                surfaces_len += 1;
+            }
+        }
+    }
+    return surfaces_len;
+}
+
+fn generateSurfaces(
+    voxels: []const Voxel,
+    log_side: LogSide,
+    surfaces: []Surface,
+) void {
+    const max_index = (@as(CombinedIndices, 1) << (log_universe_side - log_side)) - 1;
+    var surface_i: usize = 0;
+    const max_combined_indices: usize = @as(usize, 1) <<
+        (@as(LogUsize, directions) * (@as(LogUsize, log_universe_side) - @as(LogUsize, log_side)));
+
+    for (0..max_combined_indices) |_morton_indices| {
+        const morton_indices: CombinedIndices = @truncate(_morton_indices);
+        if (voxels[morton_indices] == Voxel.Air) {
+            continue;
+        }
+
+        var row_major_indices: CombinedIndices = 0;
+        for (0..directions) |_direction_i| {
+            const direction_i: Direction = @truncate(_direction_i);
+            row_major_indices <<= log_universe_side;
+            row_major_indices |= pext(morton_indices, morton_mask << direction_i) << log_side;
+        }
+        for (0..directions) |_direction| {
+            const direction: Direction = @truncate(_direction);
+            const mask = morton_mask << direction;
+            const index = pext(morton_indices, mask);
+
+            const cleaned_combined_indices = morton_indices & ~mask;
+
+            {
+                var surface = Surface{
+                    .direction_sign = 0,
+                    .direction_unsigned = direction,
+                    .combined_indices = row_major_indices,
+                    .lod = log_side,
+                    .ambients = undefined,
+                };
+                if (index == 0) {
+                    surface.ambients = std.math.maxInt(Ambients);
+                    surfaces[surface_i] = surface;
+                    surface_i += 1;
+                } else {
+                    const air_voxel_i = cleaned_combined_indices | pdep(index - 1, mask);
+                    if (voxels[air_voxel_i] == Voxel.Air) {
+                        surface.ambients = computeAmbients(
+                            voxels,
+                            max_index,
+                            air_voxel_i,
+                            direction,
+                        );
+                        surfaces[surface_i] = surface;
+                        surface_i += 1;
+                    }
+                }
+            }
+            {
+                var surface = Surface{
+                    .direction_sign = 1,
+                    .direction_unsigned = direction,
+                    .combined_indices = row_major_indices,
+                    .lod = log_side,
+                    .ambients = undefined,
+                };
+                if (index == max_index) {
+                    surface.ambients = std.math.maxInt(Ambients);
+                    surfaces[surface_i] = surface;
+                    surface_i += 1;
+                } else {
+                    const air_voxel_i = cleaned_combined_indices | pdep(index + 1, mask);
+                    if (voxels[air_voxel_i] == Voxel.Air) {
+                        surface.ambients = computeAmbients(
+                            voxels,
+                            max_index,
+                            air_voxel_i,
+                            direction,
+                        );
+                        surfaces[surface_i] = surface;
+                        surface_i += 1;
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn computeLightAffine(
@@ -3116,7 +3560,7 @@ fn computeLightAffine(
                 if ((corner >> direction) & 1 == 1)
                     0.0
                 else
-                    @floatFromInt(side_len);
+                    @floatFromInt(universe_side_len);
         }
 
         const dot: f32 = dotProduct(
