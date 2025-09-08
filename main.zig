@@ -48,7 +48,7 @@ const range_rotate_unit: i32 = @intFromFloat(tau * range_rotate_factor);
 
 const directions = 3;
 
-const log_universe_side = 0x8;
+const log_universe_side = 0x5;
 const universe_side_len = 1 << log_universe_side;
 
 const log_universe_volume_len = log_universe_side * directions;
@@ -258,7 +258,7 @@ pub fn main() !void {
             bool => {
                 layer_setting.value_count = 1;
                 layer_setting.type = .bool32_ext;
-                layer_setting.p_values = &@as(vk.Bool32, if (config) vk.TRUE else vk.FALSE);
+                layer_setting.p_values = &(if (config) vk.Bool32.true else vk.Bool32.false);
             },
             comptime_int => {
                 layer_setting.value_count = 1;
@@ -315,37 +315,37 @@ pub fn main() !void {
     const physical_device_memory_properties = vki.getPhysicalDeviceMemoryProperties(physical_device);
 
     var features_descriptor_buffer: vk.PhysicalDeviceDescriptorBufferFeaturesEXT = .{
-        .descriptor_buffer = vk.TRUE,
+        .descriptor_buffer = vk.Bool32.true,
     };
     var featuers_1_4: vk.PhysicalDeviceVulkan14Features = .{
-        .dynamic_rendering_local_read = vk.TRUE,
-        .maintenance_6 = vk.TRUE,
+        .dynamic_rendering_local_read = vk.Bool32.true,
+        .maintenance_6 = vk.Bool32.true,
         .p_next = @ptrCast(&features_descriptor_buffer),
     };
     var features_1_3: vk.PhysicalDeviceVulkan13Features = .{
-        .dynamic_rendering = vk.TRUE,
-        .synchronization_2 = vk.TRUE,
+        .dynamic_rendering = vk.Bool32.true,
+        .synchronization_2 = vk.Bool32.true,
         .p_next = @ptrCast(&featuers_1_4),
     };
     var features_1_2: vk.PhysicalDeviceVulkan12Features = .{
-        .buffer_device_address = vk.TRUE,
-        .descriptor_indexing = vk.TRUE,
-        .vulkan_memory_model = vk.TRUE,
-        .vulkan_memory_model_availability_visibility_chains = vk.TRUE,
-        .shader_int_8 = vk.TRUE,
-        .uniform_and_storage_buffer_8_bit_access = vk.TRUE,
+        .buffer_device_address = vk.Bool32.true,
+        .descriptor_indexing = vk.Bool32.true,
+        .vulkan_memory_model = vk.Bool32.true,
+        .vulkan_memory_model_availability_visibility_chains = vk.Bool32.true,
+        .shader_int_8 = vk.Bool32.true,
+        .uniform_and_storage_buffer_8_bit_access = vk.Bool32.true,
         .p_next = @ptrCast(&features_1_3),
     };
     var features_1_1: vk.PhysicalDeviceVulkan11Features = .{
-        .shader_draw_parameters = vk.TRUE,
+        .shader_draw_parameters = vk.Bool32.true,
         .p_next = @ptrCast(&features_1_2),
     };
     var features: vk.PhysicalDeviceFeatures2 = .{
         .features = .{
-            .shader_int_64 = vk.TRUE,
-            .shader_int_16 = vk.TRUE,
-            .fill_mode_non_solid = vk.TRUE,
-            .wide_lines = vk.TRUE,
+            .shader_int_64 = vk.Bool32.true,
+            .shader_int_16 = vk.Bool32.true,
+            .fill_mode_non_solid = vk.Bool32.true,
+            .wide_lines = vk.Bool32.true,
         },
         .p_next = @ptrCast(&features_1_1),
     };
@@ -507,9 +507,9 @@ pub fn main() !void {
             .address_mode_u = .clamp_to_border,
             .address_mode_v = .clamp_to_border,
             .address_mode_w = undefined,
-            .anisotropy_enable = vk.FALSE,
+            .anisotropy_enable = vk.Bool32.false,
             .border_color = .float_opaque_black,
-            .compare_enable = vk.TRUE,
+            .compare_enable = vk.Bool32.true,
             .compare_op = .less,
             .flags = .{},
             .mag_filter = .linear,
@@ -519,7 +519,7 @@ pub fn main() !void {
             .min_lod = 0,
             .mip_lod_bias = 0,
             .mipmap_mode = .nearest,
-            .unnormalized_coordinates = vk.FALSE,
+            .unnormalized_coordinates = vk.Bool32.false,
         },
         null,
     );
@@ -617,16 +617,16 @@ pub fn main() !void {
                 .base_pipeline_index = undefined,
                 .p_input_assembly_state = &vk.PipelineInputAssemblyStateCreateInfo{
                     .topology = .triangle_strip,
-                    .primitive_restart_enable = vk.FALSE,
+                    .primitive_restart_enable = vk.Bool32.false,
                 },
                 .p_color_blend_state = null,
                 .p_depth_stencil_state = &vk.PipelineDepthStencilStateCreateInfo{
-                    .depth_bounds_test_enable = vk.TRUE,
+                    .depth_bounds_test_enable = vk.Bool32.true,
                     .flags = .{},
                     .depth_compare_op = .less,
-                    .depth_test_enable = vk.TRUE,
-                    .depth_write_enable = vk.TRUE,
-                    .stencil_test_enable = vk.FALSE,
+                    .depth_test_enable = vk.Bool32.true,
+                    .depth_write_enable = vk.Bool32.true,
+                    .stencil_test_enable = vk.Bool32.false,
                     .back = undefined,
                     .front = undefined,
                     .min_depth_bounds = 0.0,
@@ -651,20 +651,20 @@ pub fn main() !void {
                     .cull_mode = .{ .front_bit = true },
                     .front_face = .clockwise,
                     .polygon_mode = .fill,
-                    .depth_bias_enable = vk.TRUE,
-                    .depth_clamp_enable = vk.FALSE,
+                    .depth_bias_enable = vk.Bool32.true,
+                    .depth_clamp_enable = vk.Bool32.false,
                     .depth_bias_clamp = 0.0,
                     .depth_bias_constant_factor = 0.0,
                     .depth_bias_slope_factor = -2.0,
                     .line_width = 1.0,
-                    .rasterizer_discard_enable = vk.FALSE,
+                    .rasterizer_discard_enable = vk.Bool32.false,
                 },
                 .p_multisample_state = &vk.PipelineMultisampleStateCreateInfo{
                     .rasterization_samples = .{ .@"1_bit" = true },
-                    .sample_shading_enable = vk.FALSE,
+                    .sample_shading_enable = vk.Bool32.false,
                     .min_sample_shading = 1,
-                    .alpha_to_coverage_enable = vk.FALSE,
-                    .alpha_to_one_enable = vk.FALSE,
+                    .alpha_to_coverage_enable = vk.Bool32.false,
+                    .alpha_to_one_enable = vk.Bool32.false,
                 },
                 .p_viewport_state = &vk.PipelineViewportStateCreateInfo{
                     .scissor_count = 1,
@@ -709,14 +709,14 @@ pub fn main() !void {
                 .base_pipeline_index = undefined,
                 .p_input_assembly_state = &vk.PipelineInputAssemblyStateCreateInfo{
                     .topology = .triangle_strip,
-                    .primitive_restart_enable = vk.FALSE,
+                    .primitive_restart_enable = vk.Bool32.false,
                 },
                 .p_color_blend_state = &vk.PipelineColorBlendStateCreateInfo{
                     .attachment_count = 3,
                     .logic_op = undefined,
                     .blend_constants = undefined,
                     .flags = .{},
-                    .logic_op_enable = vk.FALSE,
+                    .logic_op_enable = vk.Bool32.false,
                     .p_attachments = &[_]vk.PipelineColorBlendAttachmentState{
                         vk.PipelineColorBlendAttachmentState{
                             .color_write_mask = .{
@@ -725,7 +725,7 @@ pub fn main() !void {
                                 .b_bit = true,
                                 .a_bit = true,
                             },
-                            .blend_enable = vk.FALSE,
+                            .blend_enable = vk.Bool32.false,
                             .alpha_blend_op = undefined,
                             .color_blend_op = undefined,
                             .dst_alpha_blend_factor = undefined,
@@ -736,12 +736,12 @@ pub fn main() !void {
                     } ** 3,
                 },
                 .p_depth_stencil_state = &vk.PipelineDepthStencilStateCreateInfo{
-                    .depth_bounds_test_enable = vk.TRUE,
+                    .depth_bounds_test_enable = vk.Bool32.true,
                     .flags = .{},
                     .depth_compare_op = .greater,
-                    .depth_test_enable = vk.TRUE,
-                    .depth_write_enable = vk.TRUE,
-                    .stencil_test_enable = vk.FALSE,
+                    .depth_test_enable = vk.Bool32.true,
+                    .depth_write_enable = vk.Bool32.true,
+                    .stencil_test_enable = vk.Bool32.false,
                     .back = undefined,
                     .front = undefined,
                     .min_depth_bounds = 0.0,
@@ -766,20 +766,20 @@ pub fn main() !void {
                     .cull_mode = .{ .back_bit = true },
                     .front_face = .clockwise,
                     .polygon_mode = .fill,
-                    .depth_bias_enable = vk.FALSE,
-                    .depth_clamp_enable = vk.FALSE,
+                    .depth_bias_enable = vk.Bool32.false,
+                    .depth_clamp_enable = vk.Bool32.false,
                     .depth_bias_clamp = 0.0,
                     .depth_bias_constant_factor = 0.0,
                     .depth_bias_slope_factor = 0.0,
                     .line_width = 1.0,
-                    .rasterizer_discard_enable = vk.FALSE,
+                    .rasterizer_discard_enable = vk.Bool32.false,
                 },
                 .p_multisample_state = &vk.PipelineMultisampleStateCreateInfo{
                     .rasterization_samples = .{ .@"1_bit" = true },
-                    .sample_shading_enable = vk.FALSE,
+                    .sample_shading_enable = vk.Bool32.false,
                     .min_sample_shading = 1,
-                    .alpha_to_coverage_enable = vk.FALSE,
-                    .alpha_to_one_enable = vk.FALSE,
+                    .alpha_to_coverage_enable = vk.Bool32.false,
+                    .alpha_to_one_enable = vk.Bool32.false,
                 },
                 .p_viewport_state = &vk.PipelineViewportStateCreateInfo{
                     .scissor_count = 1,
@@ -843,7 +843,7 @@ pub fn main() !void {
                 .base_pipeline_index = undefined,
                 .p_input_assembly_state = &vk.PipelineInputAssemblyStateCreateInfo{
                     .topology = .triangle_list,
-                    .primitive_restart_enable = vk.FALSE,
+                    .primitive_restart_enable = vk.Bool32.false,
                 },
                 .p_color_blend_state = &vk.PipelineColorBlendStateCreateInfo{
                     .attachment_count = 3,
@@ -869,10 +869,10 @@ pub fn main() !void {
                     } ** 3,
                 },
                 .p_depth_stencil_state = &vk.PipelineDepthStencilStateCreateInfo{
-                    .depth_test_enable = vk.FALSE,
-                    .depth_write_enable = vk.FALSE,
-                    .depth_bounds_test_enable = vk.FALSE,
-                    .stencil_test_enable = vk.FALSE,
+                    .depth_test_enable = vk.Bool32.false,
+                    .depth_write_enable = vk.Bool32.false,
+                    .depth_bounds_test_enable = vk.Bool32.false,
+                    .stencil_test_enable = vk.Bool32.false,
                     .depth_compare_op = undefined,
                     .flags = .{},
                     .min_depth_bounds = undefined,
@@ -888,20 +888,20 @@ pub fn main() !void {
                     .cull_mode = .{ .back_bit = true },
                     .front_face = .counter_clockwise,
                     .polygon_mode = .fill,
-                    .depth_bias_enable = vk.FALSE,
-                    .depth_clamp_enable = vk.FALSE,
+                    .depth_bias_enable = vk.Bool32.false,
+                    .depth_clamp_enable = vk.Bool32.false,
                     .depth_bias_clamp = 0.0,
                     .depth_bias_constant_factor = 0.0,
                     .depth_bias_slope_factor = 0.0,
                     .line_width = 1.0,
-                    .rasterizer_discard_enable = vk.FALSE,
+                    .rasterizer_discard_enable = vk.Bool32.false,
                 },
                 .p_multisample_state = &vk.PipelineMultisampleStateCreateInfo{
                     .rasterization_samples = .{ .@"1_bit" = true },
-                    .sample_shading_enable = vk.FALSE,
+                    .sample_shading_enable = vk.Bool32.false,
                     .min_sample_shading = 1,
-                    .alpha_to_coverage_enable = vk.FALSE,
-                    .alpha_to_one_enable = vk.FALSE,
+                    .alpha_to_coverage_enable = vk.Bool32.false,
+                    .alpha_to_one_enable = vk.Bool32.false,
                 },
                 .p_viewport_state = &vk.PipelineViewportStateCreateInfo{
                     .scissor_count = 1,
@@ -971,7 +971,7 @@ pub fn main() !void {
                 .base_pipeline_index = undefined,
                 .p_input_assembly_state = &vk.PipelineInputAssemblyStateCreateInfo{
                     .topology = .triangle_list,
-                    .primitive_restart_enable = vk.FALSE,
+                    .primitive_restart_enable = vk.Bool32.false,
                 },
                 .p_color_blend_state = &vk.PipelineColorBlendStateCreateInfo{
                     .attachment_count = 1,
@@ -1003,20 +1003,20 @@ pub fn main() !void {
                     .cull_mode = .{ .back_bit = true },
                     .front_face = .counter_clockwise,
                     .polygon_mode = .fill,
-                    .depth_bias_enable = vk.FALSE,
-                    .depth_clamp_enable = vk.FALSE,
+                    .depth_bias_enable = vk.Bool32.false,
+                    .depth_clamp_enable = vk.Bool32.false,
                     .depth_bias_clamp = 0.0,
                     .depth_bias_constant_factor = 0.0,
                     .depth_bias_slope_factor = 0.0,
                     .line_width = 1.0,
-                    .rasterizer_discard_enable = vk.FALSE,
+                    .rasterizer_discard_enable = vk.Bool32.false,
                 },
                 .p_multisample_state = &vk.PipelineMultisampleStateCreateInfo{
                     .rasterization_samples = .{ .@"1_bit" = true },
-                    .sample_shading_enable = vk.FALSE,
+                    .sample_shading_enable = vk.Bool32.false,
                     .min_sample_shading = 1,
-                    .alpha_to_coverage_enable = vk.FALSE,
-                    .alpha_to_one_enable = vk.FALSE,
+                    .alpha_to_coverage_enable = vk.Bool32.false,
+                    .alpha_to_one_enable = vk.Bool32.false,
                 },
                 .p_viewport_state = &vk.PipelineViewportStateCreateInfo{
                     .scissor_count = 1,
@@ -1185,16 +1185,16 @@ pub fn main() !void {
             const coord = pext(voxel_i, morton_mask << direction_i);
             sum += coord * coord;
         }
-        const max_sum = 1 << (2 * log_universe_side);
+        const max_sum = (1 << (2 * log_universe_side)) * 3 / 2;
         voxels[voxel_i] = if (sum > max_sum) Voxel.Stone else Voxel.Air;
     }
     updateTree(&voxel_tree);
 
-    // const log_side = 1;
-    // var surfaces_len: usize = countSurfaces(
-    //     voxel_tree[log_side],
-    //     log_side,
-    // );
+    const use_tree = true;
+    var surfaces_len: usize = if (use_tree) 0 else countSurfaces(
+        voxel_tree[0],
+        0,
+    );
 
     var surfaces_transfer: Buffer = try Buffer.create(
         vkd,
@@ -1203,7 +1203,7 @@ pub fn main() !void {
         vk.BufferUsageFlags{
             .transfer_src_bit = true,
         },
-        @sizeOf(Surface) * maximum_surfaces_len,
+        @sizeOf(Surface) * (if (use_tree) maximum_surfaces_len else 2 * surfaces_len),
         vk.MemoryPropertyFlags{
             .host_visible_bit = true,
         },
@@ -1295,13 +1295,21 @@ pub fn main() !void {
     const side: f32 = (universe_side_len / @sqrt(@as(f32, @floatFromInt(directions))));
     uniform_mapped.camera.position = [_]f32{side - 10.0} ** directions;
 
+    var voxels_changed = true;
+    var camera_position_changed = true;
+    var should_surfaces_transfer: bool = false;
+
     while (true) {
         if (wl_display.roundtrip() != .SUCCESS) return error.RoundtripFailed;
 
         const new_time = nanoTimestamp();
         const dt = @as(f32, @floatFromInt(new_time - time)) / 1_000_000_000.0;
         time = new_time;
-        print("fps: {x}\n", .{@as(usize, @intFromFloat(1.0 / dt))});
+        // print("{}\n", .{surfaces_len});
+        // print("fps: {}, surfaces_len: {}\n", .{
+        //     @as(usize, @intFromFloat(1.0 / dt)),
+        //     surfaces_len,
+        // });
 
         light_angle += dt * 0.05;
         light_angle = @max(tau, light_angle);
@@ -1380,34 +1388,36 @@ pub fn main() !void {
                 if (camera_keyboard.positive[0] and !camera_keyboard.negative[0]) {
                     uniform_mapped.camera.position[2] -= d[0];
                     uniform_mapped.camera.position[0] += d[2];
+                    camera_position_changed = true;
                 } else if (!camera_keyboard.positive[0] and camera_keyboard.negative[0]) {
                     uniform_mapped.camera.position[2] += d[0];
                     uniform_mapped.camera.position[0] -= d[2];
+                    camera_position_changed = true;
                 }
 
                 if (camera_keyboard.positive[1] and !camera_keyboard.negative[1]) {
                     uniform_mapped.camera.position[1] += d[1];
+                    camera_position_changed = true;
                 } else if (!camera_keyboard.positive[1] and camera_keyboard.negative[1]) {
                     uniform_mapped.camera.position[1] -= d[1];
+                    camera_position_changed = true;
                 }
 
                 if (camera_keyboard.positive[2] and !camera_keyboard.negative[2]) {
                     uniform_mapped.camera.position[2] += d[2];
                     uniform_mapped.camera.position[0] += d[0];
+                    camera_position_changed = true;
                 } else if (!camera_keyboard.positive[2] and camera_keyboard.negative[2]) {
                     uniform_mapped.camera.position[2] -= d[2];
                     uniform_mapped.camera.position[0] -= d[0];
+                    camera_position_changed = true;
                 }
             }
 
-            var update_tree: bool = false;
             if (camera_pointer.create != camera_pointer.destroy) {
                 const origin = uniform_mapped.camera.position;
                 var indices: [directions]usize = undefined;
                 var combined_indices: usize = 0;
-
-                // const direction: [directions]f32 = [_]f32{1.0} ** directions;
-                // for (0 .. directions
 
                 var ray: [directions]f32 = [_]f32{
                     0.0,
@@ -1440,7 +1450,7 @@ pub fn main() !void {
                         } else if (old_combined_indices != null) {
                             voxels[old_combined_indices.?] = Voxel.Stone;
                         }
-                        update_tree = true;
+                        voxels_changed = true;
                         break;
                     }
                     var t_min: f32 = std.math.inf(f32);
@@ -1472,7 +1482,7 @@ pub fn main() !void {
             camera_pointer.create = false;
             camera_pointer.destroy = false;
 
-            if (update_tree) {
+            if (use_tree and voxels_changed) {
                 updateTree(&voxel_tree);
             }
 
@@ -1703,7 +1713,7 @@ pub fn main() !void {
                                 .opaque_bit_khr = true,
                             },
                             .present_mode = .fifo_khr,
-                            .clipped = vk.TRUE,
+                            .clipped = vk.Bool32.true,
                             .pre_transform = surface_capabilities.current_transform,
                         },
                         null,
@@ -1730,45 +1740,38 @@ pub fn main() !void {
             xdg_toplevel_event = null;
         }
 
-        // surfaces_len = countSurfaces(
-        //     voxel_tree[log_side],
-        //     log_side,
-        // );
-        // generateSurfaces(
-        //     voxel_tree[log_side],
-        //     log_side,
-        //     surfaces_mapped[0..surfaces_len],
-        // );
-        //
-
-        const surfaces_len = countSurfacesOnVoxelTree(
-            &[_]Index{0} ** directions,
-            &voxel_tree,
-            log_universe_side,
-            &uniform_mapped.camera.position,
-        );
-        var surface_i: usize = 0;
-        generateSurfacesOnVoxelTree(
-            surfaces_mapped[0..surfaces_len],
-            &surface_i,
-            &[_]Index{0} ** directions,
-            &voxel_tree,
-            log_universe_side,
-            &uniform_mapped.camera.position,
-        );
-
-        // const previous_surfaces_len = countSurfaces(voxel_tree[0], 0);
-        // print("{x} ~ {x}\n\n", .{ surfaces_len, previous_surfaces_len });
-
-        // surfaces_len = countSurfaces(
-        //     voxel_tree[log_side],
-        //     log_side,
-        // );
-        // generateSurfaces(
-        //     voxel_tree[log_side],
-        //     log_side,
-        //     surfaces_mapped[0..surfaces_len],
-        // );
+        if (use_tree and (voxels_changed or camera_position_changed)) {
+            const zero_indices: [directions]Index = [_]Index{0} ** directions;
+            surfaces_len = countSurfacesOnVoxelTree(
+                &zero_indices,
+                &voxel_tree,
+                log_universe_side,
+                &uniform_mapped.camera.position,
+            );
+            var surface_i: usize = 0;
+            generateSurfacesOnVoxelTree(
+                surfaces_mapped[0..surfaces_len],
+                &surface_i,
+                &zero_indices,
+                &voxel_tree,
+                log_universe_side,
+                &uniform_mapped.camera.position,
+            );
+            should_surfaces_transfer = true;
+        } else if (!use_tree and voxels_changed) {
+            surfaces_len = countSurfaces(
+                voxel_tree[0],
+                0,
+            );
+            generateSurfaces(
+                voxel_tree[0],
+                0,
+                surfaces_mapped[0..surfaces_len],
+            );
+            should_surfaces_transfer = true;
+        }
+        camera_position_changed = false;
+        voxels_changed = false;
 
         const descriptor_buffer_binding_info = vk.DescriptorBufferBindingInfoEXT{
             .address = descriptor_buffer_device_address,
@@ -1779,7 +1782,7 @@ pub fn main() !void {
             device,
             1,
             @ptrCast(&command_buffer_fences[frame]),
-            vk.TRUE,
+            vk.Bool32.true,
             std.math.maxInt(u64),
         );
         _ = try vkd.resetFences(
@@ -1802,21 +1805,31 @@ pub fn main() !void {
 
         const command_buffer = command_buffers[frame];
         {
-            try vkd.beginCommandBuffer(command_buffer, &.{ .flags = .{ .one_time_submit_bit = true } });
-
-            vkd.cmdCopyBuffer2(
+            try vkd.beginCommandBuffer(
                 command_buffer,
-                &vk.CopyBufferInfo2{
-                    .src_buffer = surfaces_transfer.buffer,
-                    .dst_buffer = surfaces.buffer,
-                    .region_count = 1,
-                    .p_regions = @ptrCast(&vk.BufferCopy2{
-                        .src_offset = 0,
-                        .dst_offset = 0,
-                        .size = @sizeOf(Surface) * surfaces_len,
-                    }),
+                &.{
+                    .flags = .{
+                        .one_time_submit_bit = true,
+                    },
                 },
             );
+
+            if (should_surfaces_transfer) {
+                vkd.cmdCopyBuffer2(
+                    command_buffer,
+                    &vk.CopyBufferInfo2{
+                        .src_buffer = surfaces_transfer.buffer,
+                        .dst_buffer = surfaces.buffer,
+                        .region_count = 1,
+                        .p_regions = @ptrCast(&vk.BufferCopy2{
+                            .src_offset = 0,
+                            .dst_offset = 0,
+                            .size = @sizeOf(Surface) * surfaces_len,
+                        }),
+                    },
+                );
+                should_surfaces_transfer = false;
+            }
 
             vkd.cmdPipelineBarrier2(command_buffer, &vk.DependencyInfo{
                 .buffer_memory_barrier_count = 1,
@@ -2836,7 +2849,7 @@ fn debugCallback(
     _: vk.DebugUtilsMessageTypeFlagsEXT,
     p_callback_data: ?*const vk.DebugUtilsMessengerCallbackDataEXT,
     _: ?*anyopaque,
-) callconv(.C) vk.Bool32 {
+) callconv(.c) vk.Bool32 {
     const data = p_callback_data.?;
 
     var color_code: u8 = undefined;
@@ -2862,7 +2875,7 @@ fn debugCallback(
     if (message_severity.error_bit_ext) {
         @panic("shit");
     }
-    return vk.FALSE;
+    return vk.Bool32.false;
 }
 
 fn findMemoryTypeIndex(
@@ -2963,7 +2976,7 @@ fn updateTree(voxel_tree: *const [log_universe_side + 1][]Voxel) void {
     }
 }
 
-const radius_0: f32 = 10.0;
+const radius_0: f32 = 5.0;
 
 fn countSurfacesOnVoxel(
     indices: *const [directions]Index,
@@ -3006,28 +3019,30 @@ fn countSurfacesOnVoxel(
 fn countSurfacesOnVoxelTree(
     indices: *const [directions]Index,
     voxel_tree: *const [log_universe_side + 1][]const Voxel,
-    log_side_len: LogSide,
+    log_side: LogSide,
     camera_position: *const [directions]f32,
 ) usize {
-    if (log_side_len == 0) {
+    if (log_side == 0) {
         return countSurfacesOnVoxel(
             indices,
-            voxel_tree[log_side_len],
-            log_side_len,
+            voxel_tree[log_side],
+            log_side,
         );
     }
 
-    const radius: f32 = radius_0 * @as(f32, @floatFromInt(@as(usize, 1) << log_side_len));
+    const radius: f32 = radius_0 * @as(f32, @floatFromInt(@as(usize, 1) << log_side));
+
     const distance_squared: f32 = pointToCubeSquaredDistance(
         camera_position,
         indices,
-        log_side_len,
+        log_side,
     );
+
     if (radius * radius < distance_squared) {
         return countSurfacesOnVoxel(
             indices,
-            voxel_tree[log_side_len],
-            log_side_len,
+            voxel_tree[log_side],
+            log_side,
         );
     }
 
@@ -3044,7 +3059,7 @@ fn countSurfacesOnVoxelTree(
         surfaces_len += countSurfacesOnVoxelTree(
             &sub_indices,
             voxel_tree,
-            log_side_len - 1,
+            log_side - 1,
             camera_position,
         );
     }
@@ -3059,10 +3074,14 @@ fn pointToCubeSquaredDistance(
 ) f32 {
     var sum: f32 = 0.0;
     const cube_radius: f32 = 0.5 * @as(f32, @floatFromInt(@as(usize, 1) << cube_log_side_len));
+
     for (0..directions) |direction| {
         const cube_index_float: f32 = @floatFromInt(@as(usize, cube_indices[direction]) << cube_log_side_len);
         const difference = @abs(point[direction] - (cube_index_float + cube_radius)) - cube_radius;
-        sum += difference * difference;
+
+        if (difference > 0.0) {
+            sum += difference * difference;
+        }
     }
     return sum;
 }
@@ -3079,7 +3098,7 @@ fn countFractionOfMaximumSurfaces(
     @setEvalBranchQuota(directions * (1 << (directions * log_universe_side)));
 
     if (log_side == 0) {
-        return directions << 1;
+        return directions;
     }
 
     const radius: f32 = radius_0 * @as(f32, @floatFromInt(@as(usize, 1) << log_side));
@@ -3089,7 +3108,7 @@ fn countFractionOfMaximumSurfaces(
         distance_squared += distance * distance;
     }
     if (radius * radius < distance_squared) {
-        return directions << 1;
+        return directions;
     }
 
     var surfaces_len: usize = 0;
@@ -3111,7 +3130,7 @@ fn countFractionOfMaximumSurfaces(
     return surfaces_len;
 }
 
-fn generateSurfacesOnVoxel(
+inline fn generateSurfacesOnVoxel(
     surfaces: []Surface,
     surface_i: *usize,
     indices: *const [directions]Index,

@@ -1,6 +1,6 @@
 struct VSInput {
   [[vk::location(0)]]
-  uint64_t surface;
+  uint32_t surface;
 };
 struct Uniform {
   float4 light_affine[3];
@@ -28,7 +28,7 @@ vector<T, N> applyAffine<T : __BuiltinFloatingPointType, let N : int>(
   return output;
 }
 
-static const uint log_side_len = 0x8;
+static const uint log_side_len = 0x5;
 static const uint log_lod = uint(ceil(log2(float(log_side_len + 1))));
 static const uint lod_mask = (1 << log_lod) - 1;
 

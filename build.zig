@@ -3,7 +3,7 @@ const Scanner = @import("wayland").Scanner;
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
-    // const optimize = b.standardOptimizeOption(.{});
+    const optimize = b.standardOptimizeOption(.{});
 
     const scanner = Scanner.create(b, .{});
     const wayland = b.createModule(.{ .root_source_file = scanner.result });
@@ -26,7 +26,7 @@ pub fn build(b: *std.Build) void {
     const exe_mod = b.createModule(.{
         .root_source_file = b.path("main.zig"),
         .target = target,
-        .optimize = .Debug,
+        .optimize = optimize,
         .omit_frame_pointer = false,
     });
     exe_mod.addImport("wayland", wayland);
@@ -84,6 +84,9 @@ pub fn build(b: *std.Build) void {
     exe.linkSystemLibrary("wayland-client");
 
     const run = b.addRunArtifact(exe);
+    if (b.args) |args| {
+        run.addArgs(args);
+    }
 
     const run_step = b.step("run", "run vk-wl");
     run_step.dependOn(&run.step);
